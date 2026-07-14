@@ -234,6 +234,36 @@ The client speaks the same PSK and EAP-MSCHAPv2 flows the server accepts, so
 `ikev2` ↔ `ikev2d` interoperate directly, and `ikev2` also works against other
 RFC 7296 responders that accept these authentication methods.
 
+### Embedding the client
+
+The handshake and data path are also available as a reusable, dependency-free
+package, `github.com/xen0bit/ikennkt/client`: `client.Dial` performs the
+handshake and brings up the ESP data path over a TUN **without** installing
+routes, returning the assigned address/DNS/gateway for the caller to apply. The
+`ikev2` command is a thin wrapper over it.
+
+### Desktop integration (NetworkManager)
+
+A NetworkManager VPN plugin lets a Linux desktop (GNOME / Pop!\_OS) bring the
+tunnel up and down from its native VPN UI, with **no** dependency on strongSwan.
+It lives in the nested `nm/` module (the only part that uses a third-party
+dependency and is kept out of the core build so `ikev2d`/`ikev2`/`testclient`
+stay CGO-free and stdlib-only):
+
+```sh
+cd nm && make build && sudo make install
+sudo systemctl reload NetworkManager
+nmcli connection add type vpn con-name home-ikennkt ifname '*' \
+  vpn-type org.freedesktop.NetworkManager.ikennkt \
+  vpn.data 'gateway=vpn.example.com, local-id=client.example.com, full-tunnel=yes'
+nmcli connection modify home-ikennkt vpn.secrets 'psk=a-strong-preshared-key'
+nmcli connection up home-ikennkt
+```
+
+See [`doc/networkmanager-plugin.md`](doc/networkmanager-plugin.md) for the full
+design, the D-Bus contract, the runbook, and the roadmap (a graphical *Add VPN*
+form is the remaining phase).
+
 ## Testing
 
 ```sh
