@@ -1,0 +1,20 @@
+# GoReleaser output
+/dist/
+
+# Local build output (see Makefile)
+/bin/
+/coverage/
+
+# Compiled test/binaries and coverage profiles
+*.test
+*.out
+*.prof
+
+# Binaries built at the repo root (e.g. `go build -o ikev2d ./cmd/ikev2d`)
+/ikev2d
+/ikev2
+/testclient
+
+# Editor / OS cruft
+*.swp
+.DS_Store

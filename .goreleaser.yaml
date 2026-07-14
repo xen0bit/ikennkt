@@ -1,0 +1,160 @@
+# GoReleaser configuration for ikev2-go.
+# https://goreleaser.com  —  docs for every stanza below.
+#
+# Local usage:
+#   goreleaser check                 # validate this file
+#   goreleaser build --snapshot --clean   # build binaries without releasing
+#   goreleaser release --snapshot --clean # full pipeline dry-run (no publish)
+#   goreleaser release --clean            # real release (needs a git tag + GITHUB_TOKEN)
+#
+# This project is a pure-Go IKEv2 VPN with no cgo. NOTE: the TUN data path and
+# route installation are Linux-only (other OSes compile but error at runtime),
+# so releases target Linux only. The IKE/handshake code itself is portable — add
+# other GOOS values below if you want handshake-only builds elsewhere.
+
+version: 2
+
+project_name: ikev2-go
+
+before:
+  hooks:
+    - go mod tidy
+    - go vet ./...
+
+# ---------------------------------------------------------------------------
+# Builds — one entry per command (each has its own main package).
+# CGO is disabled everywhere; everything is Go stdlib.
+# ldflags stamp main.version/commit/date if those vars exist (harmless if not).
+# ---------------------------------------------------------------------------
+builds:
+  - id: ikev2d
+    binary: ikev2d
+    main: ./cmd/ikev2d
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64, arm]
+    goarm: ["7"]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .CommitDate }}
+
+  - id: ikev2
+    binary: ikev2
+    main: ./cmd/ikev2
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64, arm]
+    goarm: ["7"]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .CommitDate }}
+
+  - id: testclient
+    binary: testclient
+    main: ./cmd/testclient
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64, arm]
+    goarm: ["7"]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .CommitDate }}
+
+# ---------------------------------------------------------------------------
+# Archives — one tar.gz per OS/arch containing all three binaries + docs.
+# ---------------------------------------------------------------------------
+archives:
+  - id: default
+    ids: [ikev2d, ikev2, testclient]
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    files:
+      - README.md
+      - LICENSE*
+      - bench.sh
+
+# ---------------------------------------------------------------------------
+# Linux packages (.deb / .rpm / .apk) for the daemons.
+# ---------------------------------------------------------------------------
+nfpms:
+  - id: packages
+    package_name: ikev2-go
+    ids: [ikev2d, ikev2, testclient]
+    vendor: ikev2-go
+    homepage: https://github.com/xen0bit/ikennkt
+    maintainer: Remy <remaclematt@gmail.com>
+    description: |-
+      Pure-Go userspace IKEv2 VPN — server (responder) and client (initiator).
+      Full RFC 7296 handshake with PSK / EAP-MSCHAPv2 auth, NAT traversal,
+      configuration mode, and a userspace ESP-in-UDP data path over TUN.
+    license: MIT
+    formats: [deb, rpm, apk]
+    bindir: /usr/bin
+    # The server and client open a TUN device / edit routes and need
+    # CAP_NET_ADMIN (run as root or `setcap cap_net_admin+ep`); this is noted
+    # rather than enforced, since packaging can't grant capabilities portably.
+    contents:
+      - src: README.md
+        dst: /usr/share/doc/ikev2-go/README.md
+
+# ---------------------------------------------------------------------------
+# Checksums, signing hook (optional), snapshots, changelog, release.
+# ---------------------------------------------------------------------------
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "Merge pull request"
+      - "Merge branch"
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+
+release:
+  github:
+    owner: xen0bit
+    name: ikennkt
+  draft: false
+  prerelease: auto
+  name_template: "v{{ .Version }}"
+  footer: |
+    ---
+    Built with GoReleaser. See the README for setup, `-setcap`/CAP_NET_ADMIN
+    requirements, and OS-client configuration.
