@@ -11,19 +11,21 @@
 //
 // Authentication is PSK by default; pass -user/-pass to use EAP-MSCHAPv2
 // (the server still authenticates itself with the PSK).
+//
+// The handshake and data path live in the reusable client package; this command
+// adds CLI flags, route installation, and signal handling on top.
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
+	"github.com/xen0bit/ikennkt/client"
 	"github.com/xen0bit/ikennkt/internal/dataplane"
-	"github.com/xen0bit/ikennkt/internal/ike"
 )
 
 func main() {
@@ -48,118 +50,32 @@ func main() {
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
 
-	cfg := ike.ClientConfig{
-		ServerHost:  *server,
-		ServerPort:  *port,
-		PSK:         []byte(*psk),
-		LocalID:     parseIdentity(*idStr),
-		EAPUsername: *user,
+	// 1. Handshake + data path (no routing — that stays this command's job).
+	sess, res, err := client.Dial(context.Background(), client.Config{
+		Server:      *server,
+		Port:        *port,
+		PSK:         *psk,
+		LocalID:     *idStr,
+		ServerID:    *remoteID,
+		EAPUser:     *user,
 		EAPPassword: *pass,
+		TUNName:     *tunName,
 		Logger:      logger,
-	}
-	if *remoteID != "" {
-		id := parseIdentity(*remoteID)
-		cfg.RemoteID = &id
-	}
-
-	// 1. Handshake.
-	client := ike.NewClient(cfg)
-	res, err := client.Connect()
+	})
 	if err != nil {
-		log.Fatalf("ikev2: connect failed: %v", err)
+		log.Fatalf("ikev2: %v", err)
 	}
-	defer client.Close()
-	logger.Printf("ikev2: connected. internal IP %s, netmask %s, DNS %v",
-		res.AssignedIP, res.Netmask, res.DNS)
+	defer sess.Close()
+	logger.Printf("ikev2: connected on %s, internal IP %s, netmask %s, DNS %v",
+		res.TUNName, res.AssignedIP, res.Netmask, res.DNS)
 
-	// 2. Open TUN.
-	tun, err := dataplane.OpenTUN(*tunName)
-	if err != nil {
-		log.Fatalf("ikev2: open TUN: %v", err)
-	}
-	defer tun.Close()
-	logger.Printf("ikev2: opened TUN %s", tun.Name())
-
-	// 3. Build the data-path tunnel and pump.
-	tunnel, err := res.BuildTunnel()
-	if err != nil {
-		log.Fatalf("ikev2: build tunnel: %v", err)
-	}
-
-	// The pump sends outbound ESP to the server via a dedicated UDP socket on
-	// port 4500 (NAT-T). Inbound ESP is read on that same socket.
-	espConn, err := net.DialUDP("udp", nil, res.ServerAddr)
-	if err != nil {
-		log.Fatalf("ikev2: ESP socket: %v", err)
-	}
-	defer espConn.Close()
-
-	send := func(esp []byte, _ *net.UDPAddr, udpEncap bool) {
-		// Under NAT-T, ESP on 4500 needs no non-ESP marker (that marker is only
-		// for IKE); ESP packets are sent as-is.
-		if _, werr := espConn.Write(esp); werr != nil {
-			logger.Printf("ikev2: ESP send error: %v", werr)
-		}
-	}
-
-	pump := dataplane.NewPump(tun, send, logger)
-	pump.AddTunnel(tunnel)       // inbound demux by our SPI
-	pump.SetDefaultRoute(tunnel) // outbound: everything goes to the server
-	go pump.Run()
-	defer pump.Close()
-
-	// 4. Inbound ESP read loop.
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			n, rerr := espConn.Read(buf)
-			if rerr != nil {
-				return
-			}
-			pkt := buf[:n]
-			// Strip a non-ESP marker if present (shouldn't be on ESP, but be safe).
-			if len(pkt) >= 4 && pkt[0] == 0 && pkt[1] == 0 && pkt[2] == 0 && pkt[3] == 0 {
-				continue // keepalive / non-ESP
-			}
-			pump.HandleESP(append([]byte(nil), pkt...))
-		}
-	}()
-
-	// 5. NAT keepalives: a single 0xFF byte on 4500 every 20s holds the NAT
-	// binding open (RFC 3948 2.3).
-	stopKA := make(chan struct{})
-	go func() {
-		t := time.NewTicker(20 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-stopKA:
-				return
-			case <-t.C:
-				espConn.Write([]byte{0xff})
-			}
-		}
-	}()
-	defer close(stopKA)
-
-	// 6. Routing.
+	// 2. Routing.
 	if !*noRoute {
-		srvIP := res.ServerAddr.IP
-		if r := net.ParseIP(*server); r != nil {
-			srvIP = r
-		} else if ips, lerr := net.LookupIP(*server); lerr == nil {
-			for _, ip := range ips {
-				if v4 := ip.To4(); v4 != nil {
-					srvIP = v4
-					break
-				}
-			}
-		}
 		router := dataplane.NewClientRouter(dataplane.ClientNetConfig{
-			TUNName:    tun.Name(),
+			TUNName:    res.TUNName,
 			AssignedIP: res.AssignedIP,
 			Netmask:    res.Netmask,
-			ServerIP:   srvIP,
+			ServerIP:   res.Gateway,
 			DNS:        res.DNS,
 			FullTunnel: *fullTun,
 		})
@@ -177,16 +93,9 @@ func main() {
 
 	logger.Printf("ikev2: tunnel up. Press Ctrl-C to disconnect.")
 
-	// 7. Wait for signal.
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
+	// 3. Wait for signal.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	<-ctx.Done()
 	logger.Printf("ikev2: disconnecting")
-}
-
-func parseIdentity(s string) ike.Identity {
-	if ip := net.ParseIP(s); ip != nil {
-		return ike.IPIdentity(ip)
-	}
-	return ike.FQDNIdentity(s)
 }
