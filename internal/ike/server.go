@@ -108,12 +108,35 @@ func NewServer(cfg Config) (*Server, error) {
 	if len(cfg.RemoteTS) == 0 {
 		cfg.RemoteTS = []payload.TrafficSelector{allTrafficV4()}
 	}
-	return &Server{
+
+	// Bind the sockets eagerly so a returned server is already listening: this
+	// surfaces bind errors (port in use, privilege) to the caller immediately,
+	// and removes the readiness race a lazy bind in ListenAndServe would create
+	// (a client could send to an unbound port and get ECONNREFUSED).
+	ip := net.ParseIP(cfg.ListenIP)
+	if ip == nil {
+		return nil, fmt.Errorf("ike: invalid ListenIP %q", cfg.ListenIP)
+	}
+	c500, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip, Port: cfg.Port500})
+	if err != nil {
+		return nil, fmt.Errorf("ike: bind :%d: %w", cfg.Port500, err)
+	}
+	c4500, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip, Port: cfg.Port4500})
+	if err != nil {
+		c500.Close()
+		return nil, fmt.Errorf("ike: bind :%d: %w", cfg.Port4500, err)
+	}
+
+	s := &Server{
 		cfg:      cfg,
 		log:      cfg.Logger,
 		byRSPI:   make(map[uint64]*IKESA),
 		byRemote: make(map[string]*IKESA),
-	}, nil
+	}
+	s.tr = &transport{conn500: c500, conn4500: c4500, onESP: s.handleESP}
+	s.log.Printf("ikev2: listening on %s (IKE :%d, NAT-T/ESP :%d)",
+		cfg.ListenIP, cfg.Port500, cfg.Port4500)
+	return s, nil
 }
 
 func allTrafficV4() payload.TrafficSelector {
@@ -127,25 +150,12 @@ func allTrafficV4() payload.TrafficSelector {
 	}
 }
 
-// ListenAndServe binds both UDP sockets and processes messages until Close.
+// ListenAndServe processes messages on the sockets bound by NewServer until
+// Close. It blocks until the server is closed.
 func (s *Server) ListenAndServe() error {
-	ip := net.ParseIP(s.cfg.ListenIP)
-	if ip == nil {
-		return fmt.Errorf("ike: invalid ListenIP %q", s.cfg.ListenIP)
+	if s.tr == nil {
+		return fmt.Errorf("ike: server is closed")
 	}
-	c500, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip, Port: s.cfg.Port500})
-	if err != nil {
-		return fmt.Errorf("ike: bind :%d: %w", s.cfg.Port500, err)
-	}
-	c4500, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip, Port: s.cfg.Port4500})
-	if err != nil {
-		c500.Close()
-		return fmt.Errorf("ike: bind :%d: %w", s.cfg.Port4500, err)
-	}
-	s.tr = &transport{conn500: c500, conn4500: c4500, onESP: s.handleESP}
-	s.log.Printf("ikev2: listening on %s (IKE :%d, NAT-T/ESP :%d)",
-		s.cfg.ListenIP, s.cfg.Port500, s.cfg.Port4500)
-
 	s.tr.serve(s.handlePacket, s.isClosing)
 	return nil
 }
