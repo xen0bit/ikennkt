@@ -19,29 +19,51 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 
 	"github.com/xen0bit/ikennkt/client"
 	"github.com/xen0bit/ikennkt/internal/dataplane"
 )
 
+// Build metadata, stamped via -ldflags at release time (see .goreleaser.yaml).
+// Defaults apply to `go build`/`go run` and development binaries.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
+// printVersion writes the stamped build metadata to stdout.
+func printVersion(prog string) {
+	fmt.Printf("%s %s (commit %s, built %s, %s)\n",
+		prog, version, commit, date, runtime.Version())
+}
+
 func main() {
 	var (
-		server   = flag.String("server", "", "VPN server host or IP (required)")
-		port     = flag.Int("port", 500, "server IKE port")
-		psk      = flag.String("psk", "", "pre-shared key (required)")
-		idStr    = flag.String("id", "", "local identity presented to the server (required)")
-		remoteID = flag.String("server-id", "", "expected server identity (optional, verified if set)")
-		user     = flag.String("user", "", "EAP-MSCHAPv2 username (enables EAP instead of client PSK)")
-		pass     = flag.String("pass", "", "EAP-MSCHAPv2 password")
-		tunName  = flag.String("tun", "", "TUN interface name (empty = kernel picks)")
-		fullTun  = flag.Bool("full-tunnel", true, "route all traffic through the VPN (default route)")
-		noRoute  = flag.Bool("no-route", false, "do not modify routing/addresses (diagnostic)")
+		showVersion = flag.Bool("version", false, "print version information and exit")
+		server      = flag.String("server", "", "VPN server host or IP (required)")
+		port        = flag.Int("port", 500, "server IKE port")
+		psk         = flag.String("psk", "", "pre-shared key (required)")
+		idStr       = flag.String("id", "", "local identity presented to the server (required)")
+		remoteID    = flag.String("server-id", "", "expected server identity (optional, verified if set)")
+		user        = flag.String("user", "", "EAP-MSCHAPv2 username (enables EAP instead of client PSK)")
+		pass        = flag.String("pass", "", "EAP-MSCHAPv2 password")
+		tunName     = flag.String("tun", "", "TUN interface name (empty = kernel picks)")
+		fullTun     = flag.Bool("full-tunnel", true, "route all traffic through the VPN (default route)")
+		noRoute     = flag.Bool("no-route", false, "do not modify routing/addresses (diagnostic)")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		printVersion("ikev2")
+		return
+	}
 
 	if *server == "" || *psk == "" || *idStr == "" {
 		flag.Usage()

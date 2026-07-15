@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"runtime"
 	"time"
 
 	"github.com/xen0bit/ikennkt/internal/crypto"
@@ -20,7 +21,16 @@ import (
 	"github.com/xen0bit/ikennkt/internal/payload"
 )
 
+// Build metadata, stamped via -ldflags at release time (see .goreleaser.yaml).
+// Defaults apply to `go build`/`go run` and development binaries.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
+	showVersion := flag.Bool("version", false, "print version information and exit")
 	server := flag.String("server", "127.0.0.1:500", "server IKE address")
 	espAddr := flag.String("esp", "127.0.0.1:4500", "server NAT-T/ESP address")
 	psk := flag.String("psk", "", "pre-shared key")
@@ -28,6 +38,11 @@ func main() {
 	user := flag.String("user", "", "EAP username (enables EAP-MSCHAPv2 instead of client PSK)")
 	pass := flag.String("pass", "", "EAP password")
 	flag.Parse()
+	if *showVersion {
+		fmt.Printf("testclient %s (commit %s, built %s, %s)\n",
+			version, commit, date, runtime.Version())
+		return
+	}
 	if *psk == "" {
 		log.Fatal("-psk required")
 	}

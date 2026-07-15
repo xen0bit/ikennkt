@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -34,20 +35,40 @@ import (
 	"github.com/xen0bit/ikennkt/internal/ike"
 )
 
+// Build metadata, stamped via -ldflags at release time (see .goreleaser.yaml).
+// Defaults apply to `go build`/`go run` and development binaries.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
+// printVersion writes the stamped build metadata to stdout.
+func printVersion(prog string) {
+	fmt.Printf("%s %s (commit %s, built %s, %s)\n",
+		prog, version, commit, date, runtime.Version())
+}
+
 func main() {
 	var (
-		listenIP = flag.String("listen", "0.0.0.0", "local IP to bind IKE sockets on")
-		publicIP = flag.String("public", "", "server's public IP as seen by clients (for NAT detection); defaults to -listen if concrete")
-		psk      = flag.String("psk", "", "pre-shared key (required)")
-		idStr    = flag.String("id", "", "local identity (FQDN or IP address) presented to clients (required)")
-		poolCIDR = flag.String("pool", "10.10.10.0/24", "internal address pool handed to clients")
-		dnsList  = flag.String("dns", "1.1.1.1,8.8.8.8", "comma-separated DNS servers pushed to clients")
-		tunName  = flag.String("tun", "", "TUN interface name (empty = kernel picks, e.g. tun0)")
-		setup    = flag.Bool("setup-nat", false, "auto-configure the TUN address, routing and NAT via ip/iptables (needs privileges)")
-		wanIface = flag.String("wan", "", "WAN interface for -setup-nat masquerading (e.g. eth0)")
-		eapFile  = flag.String("eap-users", "", "path to a username:password file enabling EAP-MSCHAPv2 auth (optional)")
+		showVersion = flag.Bool("version", false, "print version information and exit")
+		listenIP    = flag.String("listen", "0.0.0.0", "local IP to bind IKE sockets on")
+		publicIP    = flag.String("public", "", "server's public IP as seen by clients (for NAT detection); defaults to -listen if concrete")
+		psk         = flag.String("psk", "", "pre-shared key (required)")
+		idStr       = flag.String("id", "", "local identity (FQDN or IP address) presented to clients (required)")
+		poolCIDR    = flag.String("pool", "10.10.10.0/24", "internal address pool handed to clients")
+		dnsList     = flag.String("dns", "1.1.1.1,8.8.8.8", "comma-separated DNS servers pushed to clients")
+		tunName     = flag.String("tun", "", "TUN interface name (empty = kernel picks, e.g. tun0)")
+		setup       = flag.Bool("setup-nat", false, "auto-configure the TUN address, routing and NAT via ip/iptables (needs privileges)")
+		wanIface    = flag.String("wan", "", "WAN interface for -setup-nat masquerading (e.g. eth0)")
+		eapFile     = flag.String("eap-users", "", "path to a username:password file enabling EAP-MSCHAPv2 auth (optional)")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		printVersion("ikev2d")
+		return
+	}
 
 	if *psk == "" || *idStr == "" {
 		flag.Usage()
