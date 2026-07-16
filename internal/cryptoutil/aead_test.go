@@ -77,16 +77,15 @@ func TestBLAKE2sRFC7693(t *testing.T) {
 	}
 }
 
-// TestBLAKE2sMACIsKeyed pins the native keyed mode WireGuard's mac1/mac2 use:
-// the digest must depend on the key, and BLAKE2s keyed mode must differ from the
-// unkeyed hash of the same input.
+// TestBLAKE2sMACIsKeyed pins BLAKE2's native keyed mode: the digest must depend
+// on the key, and must differ from the unkeyed hash of the same input.
 func TestBLAKE2sMACIsKeyed(t *testing.T) {
 	msg := []byte("wireguard mac1 input")
 	keyA := bytes.Repeat([]byte{0xa1}, 32)
 	keyB := bytes.Repeat([]byte{0xb2}, 32)
 
 	mac := func(key []byte) []byte {
-		h, err := NewBLAKE2sMAC(key)
+		h, err := NewBLAKE2s256MAC(key)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -133,5 +132,33 @@ func TestXChaCha20Poly1305NonceSize(t *testing.T) {
 	back, err := x.Open(nil, nonce, ct, nil)
 	if err != nil || string(back) != "cookie" {
 		t.Fatalf("XChaCha round trip: %q, %v", back, err)
+	}
+}
+
+// TestBLAKE2s128MACWidth pins the digest width WireGuard's MAC() actually is.
+// mac1, mac2 and the cookie are all 128 bits; using the 256-bit keyed hash would
+// still be "a keyed BLAKE2s" and would still interop with itself, while every
+// real peer rejected it.
+func TestBLAKE2s128MACWidth(t *testing.T) {
+	key := bytes.Repeat([]byte{0x5a}, 32)
+	h, err := NewBLAKE2s128MAC(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Write([]byte("handshake initiation up to mac1"))
+	sum := h.Sum(nil)
+	if len(sum) != BLAKE2s128Size || BLAKE2s128Size != 16 {
+		t.Fatalf("BLAKE2s-128 digest = %d octets, want 16", len(sum))
+	}
+
+	// It must be a different function from the 256-bit one, not a truncation.
+	h256, err := NewBLAKE2s256MAC(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h256.Write([]byte("handshake initiation up to mac1"))
+	if bytes.Equal(sum, h256.Sum(nil)[:16]) {
+		t.Fatal("BLAKE2s-128 equals the truncated 256-bit digest; " +
+			"the digest length must be bound into the parameter block")
 	}
 }

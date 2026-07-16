@@ -45,6 +45,9 @@ func NewXChaCha20Poly1305(key []byte) (cipher.AEAD, error) {
 // BLAKE2sSize is the BLAKE2s-256 digest length in octets.
 const BLAKE2sSize = blake2s.Size
 
+// BLAKE2s128Size is the BLAKE2s-128 digest length in octets.
+const BLAKE2s128Size = 16
+
 // NewBLAKE2s returns an unkeyed BLAKE2s-256 hash (RFC 7693).
 func NewBLAKE2s() hash.Hash {
 	// A nil key selects the unkeyed mode; the size is valid, so the error is
@@ -56,9 +59,15 @@ func NewBLAKE2s() hash.Hash {
 	return h
 }
 
-// NewBLAKE2sMAC returns a keyed BLAKE2s-256 hash — BLAKE2's native MAC mode,
-// which is what WireGuard's mac1/mac2 use rather than HMAC. The key must be at
-// most 32 octets.
-func NewBLAKE2sMAC(key []byte) (hash.Hash, error) {
+// NewBLAKE2s256MAC returns a keyed BLAKE2s-256 hash — BLAKE2's native MAC mode,
+// which needs no HMAC construction around it. The key must be at most 32 octets.
+func NewBLAKE2s256MAC(key []byte) (hash.Hash, error) {
 	return blake2s.New256(key)
+}
+
+// NewBLAKE2s128MAC returns a keyed BLAKE2s-128 hash. This is the 128-bit digest
+// WireGuard calls MAC(): mac1, mac2 and the cookie are all this width, not the
+// 256-bit one.
+func NewBLAKE2s128MAC(key []byte) (hash.Hash, error) {
+	return blake2s.New128(key)
 }
