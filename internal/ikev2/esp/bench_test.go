@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/xen0bit/veepin/internal/ikev2/transform"
-	"github.com/xen0bit/veepin/internal/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/payload"
 )
 
 // benchSAPair builds a pair of ESP SAs sharing keys so that one can encapsulate

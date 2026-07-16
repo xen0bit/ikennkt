@@ -16,11 +16,11 @@ import (
 	"time"
 
 	"github.com/xen0bit/veepin/internal/cryptoutil"
-	"github.com/xen0bit/veepin/internal/eap"
-	"github.com/xen0bit/veepin/internal/esp"
-	"github.com/xen0bit/veepin/internal/ike"
+	"github.com/xen0bit/veepin/internal/ikev2/eap"
+	"github.com/xen0bit/veepin/internal/ikev2/esp"
+	"github.com/xen0bit/veepin/internal/ikev2/ike"
 	"github.com/xen0bit/veepin/internal/ikev2/transform"
-	"github.com/xen0bit/veepin/internal/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/payload"
 )
 
 // Build metadata, stamped via -ldflags at release time (see .goreleaser.yaml).

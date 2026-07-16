@@ -4,7 +4,7 @@ import (
 	"net"
 
 	"github.com/xen0bit/veepin/internal/ikev2/transform"
-	"github.com/xen0bit/veepin/internal/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/payload"
 )
 
 // handleIKESAInit processes an IKE_SA_INIT request and sends the response.

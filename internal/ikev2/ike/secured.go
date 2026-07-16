@@ -3,7 +3,7 @@ package ike
 import (
 	"net"
 
-	"github.com/xen0bit/veepin/internal/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/payload"
 )
 
 // handleSecured decrypts and dispatches a protected exchange (everything after

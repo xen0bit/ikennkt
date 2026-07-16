@@ -3,7 +3,7 @@ package ike
 import (
 	"net"
 
-	"github.com/xen0bit/veepin/internal/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/payload"
 )
 
 // handleCreateChildSA processes a CREATE_CHILD_SA request. It supports

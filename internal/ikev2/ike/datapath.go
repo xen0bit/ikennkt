@@ -5,8 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/xen0bit/veepin/internal/dataplane"
-	"github.com/xen0bit/veepin/internal/esp"
+	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/ikev2/esp"
 )
 
 // espTunnel adapts an established Child SA to the dataplane.ESPTunnel interface,

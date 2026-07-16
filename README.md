@@ -47,28 +47,36 @@ nothing else has to change.)
 
 EAP-MSCHAPv2 additionally uses MD4 (for the NT password hash) and single-DES
 (for the challenge response), as the protocol mandates. Go's standard library
-has DES but not MD4, so a compact RFC 1320 MD4 is included in `internal/eap`;
+has DES but not MD4, so a compact RFC 1320 MD4 is included in `internal/ikev2/eap`;
 these legacy primitives are used only where MSCHAPv2 requires them, never for
 transport security.
 
 ## Architecture
 
+The tree separates machinery any VPN protocol needs from what is specific to one
+protocol. IKEv2 is the first protocol; others become siblings under `internal/`.
+
 ```
 cmd/ikev2d               server daemon: flags, TUN + pool wiring, signal handling
 cmd/ikev2                client daemon: connect, TUN, routing, data path
-internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers — protocol-agnostic
-internal/dataplane       TUN device, address pool, ESP pump (SPI demux + routing), client routing
-internal/eap             EAP packet codec + EAP-MSCHAPv2 (MD4/DES/SHA1, MSK derivation)
-internal/esp             ESP encapsulate/decapsulate + anti-replay
-internal/payload         wire codec: header, payloads, SA/KE/Nonce/Notify/ID/AUTH/TS/Delete/CP
+client                   embeddable client: Dial -> Session + Result
+
+dataplane                TUN device, address pool, ESP pump (SPI demux + routing), routing
+internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers
+
+internal/ikev2/payload   wire codec: header, payloads, SA/KE/Nonce/Notify/ID/AUTH/TS/Delete/CP
 internal/ikev2/transform IANA transform ID -> cryptoutil primitive
-internal/ike             negotiation, SK seal/open, NAT-T, CP, exchange handlers, keymat, Client
+internal/ikev2/eap       EAP packet codec + EAP-MSCHAPv2 (MD4/DES/SHA1, MSK derivation)
+internal/ikev2/esp       ESP encapsulate/decapsulate + anti-replay
+internal/ikev2/ike       negotiation, SK seal/open, NAT-T, CP, exchange handlers, keymat, Client
 ```
 
-`cryptoutil` and `dataplane` are deliberately protocol-agnostic — they import nothing
-from this module and know nothing about IKEv2, so a second VPN protocol can reuse them
-as-is. Everything IKEv2-specific about the algorithms lives in `ikev2/transform`, which
-is the only package that translates IANA transform IDs into primitives.
+`dataplane` and `internal/cryptoutil` are protocol-agnostic: neither imports anything
+else in this module, and neither knows IKEv2 exists. The pump is written against a
+`Tunnel` interface, and the crypto primitives are named for what they are
+(`NewAESGCMSKCipher`, `NewECDH`) rather than for IKEv2's transform-ID registry.
+`internal/ikev2/transform` is the single place that translates IANA transform IDs into
+primitives — which is what keeps the boundary honest.
 
 Data flow once a client is connected:
 
@@ -281,7 +289,7 @@ go test -race ./...        # correctness
 
 Highlights:
 
-- `internal/ike` — `TestEndToEndHandshake` (full IKE_SA_INIT + IKE_AUTH +
+- `internal/ikev2/ike` — `TestEndToEndHandshake` (full IKE_SA_INIT + IKE_AUTH +
   liveness with a real initiator against the live dual-socket server),
   `TestFullVPNFlow` (handshake + NAT-T + CP address assignment + a real IP
   packet delivered through ESP onto the server's TUN), and
@@ -290,18 +298,18 @@ Highlights:
   and `TestClientConnectPSK` / `TestClientConnectEAP` / `TestClientWrongPSK`
   (the production client driven against the live server, including bidirectional
   ESP through the negotiated Child SA).
-- `internal/eap` — MD4 against RFC 1320 vectors, MSCHAPv2 key derivation against
+- `internal/ikev2/eap` — MD4 against RFC 1320 vectors, MSCHAPv2 key derivation against
   the RFC 3079 test vectors, and a full server exchange with a simulated client
   (matching MSKs on success, rejection on wrong password/unknown user).
-- `internal/dataplane` — `TestPumpRoundTrip` (TUN → ESP → demux → decap round
+- `dataplane` — `TestPumpRoundTrip` (TUN → ESP → demux → decap round
   trip), address-pool allocation/exhaustion/reuse, unknown-SPI drop.
 - `internal/cryptoutil` — DH agreement across all five groups, the RFC 5903 point
   prefix, prf+, GCM/CBC round trips with tamper detection.
 - `internal/ikev2/transform` — every negotiable transform ID resolves to a
   primitive, unsupported IDs are rejected, and the negotiated ID (not a guess
   from key length) selects the ESP algorithm.
-- `internal/esp` — ESP round trips and anti-replay.
-- `internal/payload` — header/payload/SA/TS/CP codec round trips.
+- `internal/ikev2/esp` — ESP round trips and anti-replay.
+- `internal/ikev2/payload` — header/payload/SA/TS/CP codec round trips.
 
 ## Benchmarks
 
@@ -319,19 +327,19 @@ or directly with `go test -bench . -benchmem ./...`.
 
 What's measured:
 
-- **Data plane** (`internal/esp`, `internal/dataplane`) — ESP encapsulate,
+- **Data plane** (`internal/ikev2/esp`, `dataplane`) — ESP encapsulate,
   decapsulate and full round-trip, and the pump's inbound demux+decap+TUN path,
   across 64/576/1400-byte packets for AES-GCM (128/256) and AES-CBC+HMAC.
   Reported in MB/s via `b.SetBytes`.
-- **Handshake** (`internal/ike`) — SK message seal/open, and a full PSK
+- **Handshake** (`internal/ikev2/ike`) — SK message seal/open, and a full PSK
   handshake (IKE_SA_INIT + IKE_AUTH) over real UDP loopback against the live
   server.
-- **Asymmetric crypto** (`internal/cryptoutil`, `internal/ike`) — DH key generation
+- **Asymmetric crypto** (`internal/cryptoutil`, `internal/ikev2/ike`) — DH key generation
   and shared-secret computation for each group, prf+ expansion and raw cipher seal,
   plus IKE/Child key derivation.
-- **Login** (`internal/eap`) — NT hashing, MSCHAPv2 challenge response, MSK
+- **Login** (`internal/ikev2/eap`) — NT hashing, MSCHAPv2 challenge response, MSK
   derivation, and a full server-side authentication.
-- **Codec** (`internal/payload`) — message parse/build and SA/TS round-trips.
+- **Codec** (`internal/ikev2/payload`) — message parse/build and SA/TS round-trips.
 
 Representative results (Intel Xeon @ 2.8 GHz, Go 1.26, single core):
 

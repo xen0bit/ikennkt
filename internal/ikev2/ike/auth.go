@@ -6,7 +6,7 @@ import (
 	"net"
 
 	"github.com/xen0bit/veepin/internal/cryptoutil"
-	"github.com/xen0bit/veepin/internal/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/payload"
 )
 
 // Identity describes a local or peer identity for IKE_AUTH.

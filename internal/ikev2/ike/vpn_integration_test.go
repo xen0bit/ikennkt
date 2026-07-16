@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/dataplane"
-	"github.com/xen0bit/veepin/internal/esp"
+	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/ikev2/esp"
 )
 
 // memTUN is an in-memory TUN device for the integration test: packets the

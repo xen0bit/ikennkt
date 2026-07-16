@@ -9,6 +9,7 @@ on:
     branches: [main]
     paths:
       - "internal/**"
+      - "dataplane/**"
       - "client/**"
       - "cmd/ikev2/**"
       - "cmd/ikev2d/**"
@@ -19,6 +20,7 @@ on:
     branches: [main]
     paths:
       - "internal/**"
+      - "dataplane/**"
       - "client/**"
       - "cmd/ikev2/**"
       - "cmd/ikev2d/**"

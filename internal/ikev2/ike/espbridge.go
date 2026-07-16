@@ -3,7 +3,7 @@ package ike
 import (
 	"fmt"
 
-	"github.com/xen0bit/veepin/internal/esp"
+	"github.com/xen0bit/veepin/internal/ikev2/esp"
 )
 
 // BuildESPSA converts a negotiated Child SA into a userspace esp.SA, wiring the

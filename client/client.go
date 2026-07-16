@@ -19,8 +19,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/dataplane"
-	"github.com/xen0bit/veepin/internal/ike"
+	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/ikev2/ike"
 )
 
 // ErrAuth wraps a handshake failure caused by rejected credentials (a wrong PSK

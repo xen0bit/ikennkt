@@ -3,9 +3,9 @@ package dataplane
 import (
 	"bytes"
 	"encoding/binary"
-	"github.com/xen0bit/veepin/internal/esp"
+	"github.com/xen0bit/veepin/internal/ikev2/esp"
 	"github.com/xen0bit/veepin/internal/ikev2/transform"
-	"github.com/xen0bit/veepin/internal/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/payload"
 	"net"
 	"sync"
 	"testing"

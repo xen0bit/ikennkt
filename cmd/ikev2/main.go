@@ -27,7 +27,7 @@ import (
 	"syscall"
 
 	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/internal/dataplane"
+	"github.com/xen0bit/veepin/dataplane"
 )
 
 // Build metadata, stamped via -ldflags at release time (see .goreleaser.yaml).

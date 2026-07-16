@@ -9,7 +9,7 @@ import (
 
 	"github.com/xen0bit/veepin/internal/cryptoutil"
 	"github.com/xen0bit/veepin/internal/ikev2/transform"
-	"github.com/xen0bit/veepin/internal/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/payload"
 )
 
 // TestEndToEndHandshake drives a full IKE_SA_INIT + IKE_AUTH exchange as an

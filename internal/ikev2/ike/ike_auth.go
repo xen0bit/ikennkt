@@ -3,8 +3,8 @@ package ike
 import (
 	"net"
 
-	"github.com/xen0bit/veepin/internal/eap"
-	"github.com/xen0bit/veepin/internal/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/eap"
+	"github.com/xen0bit/veepin/internal/ikev2/payload"
 )
 
 // handleIKEAuth processes an IKE_AUTH request. Two authentication modes are

@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/eap"
-	"github.com/xen0bit/veepin/internal/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/eap"
+	"github.com/xen0bit/veepin/internal/ikev2/payload"
 )
 
 // SAState is the lifecycle state of an IKE SA.

@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/xen0bit/veepin/internal/cryptoutil"
-	"github.com/xen0bit/veepin/internal/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/payload"
 )
 
 // keyDir selects which directional keys to use.
