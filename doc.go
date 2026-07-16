@@ -3,8 +3,8 @@
 // and BLAKE2s, which the standard library does not ship).
 //
 // IKEv2 (RFC 7296) is the first protocol, as both a responder and an initiator,
-// with a userspace ESP data path; WireGuard is the second, as an initiator. The
-// tree is arranged so further protocols are siblings rather than rewrites:
+// with a userspace ESP data path; WireGuard is the second, also both. The tree
+// is arranged so further protocols are siblings rather than rewrites:
 //
 //   - cmd/veepin — the command: connect, serve and probe subcommands.
 //   - client — the protocol registry and the Session/Result contract every

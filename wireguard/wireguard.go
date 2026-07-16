@@ -17,15 +17,18 @@
 // The protocol internals (the message codec, the handshake, and the transport
 // crypto) live in internal/wireguard; this package is the supported surface.
 //
+// This package provides both roles: Dial is the initiator (below), and Server
+// (see server.go) is the multi-peer responder that `veepin serve wireguard`
+// runs.
+//
 // # Scope
 //
-// This is the initiator, single-peer data path. It performs one handshake and
-// carries traffic under that keypair; it does not yet rekey, so a session is
-// good for the handshake's lifetime (RejectAfterTime, ~180s of continuous use)
-// before it must be re-dialed. It answers no cookie replies, so a peer under
-// load will refuse it. Both are deliberate Milestone-1 boundaries, not silent
-// gaps: the first surfaces as the tunnel going quiet, the second as a refused
-// handshake.
+// A session carries traffic under a single handshake and does not yet rekey, so
+// it is good for the handshake's lifetime (RejectAfterTime, ~180s of continuous
+// use) before it must be re-established. Neither role answers cookie replies, so
+// a peer under load will refuse the handshake. Both are deliberate boundaries,
+// not silent gaps: the first surfaces as the tunnel going quiet, the second as a
+// refused handshake.
 package wireguard
 
 import (
