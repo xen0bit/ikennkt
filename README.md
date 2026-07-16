@@ -2,14 +2,17 @@
 
 A **working userspace VPN in Go** — both a server (responder) and a client
 (initiator) — written from scratch, with `golang.org/x/crypto` the only
-dependency. It speaks two protocols: **IKEv2/ESP** (client and server) and
-**WireGuard** (client). The IKEv2 side performs the full key exchange with
-pre-shared-key or EAP-MSCHAPv2 authentication, NAT traversal, and configuration
-mode (address assignment), then runs an ESP-in-UDP data path over a TUN device —
-so a standards-compliant OS VPN client can connect to the server, and the bundled
-client can connect to it (or any RFC 7296 responder). The WireGuard side performs
-the Noise_IKpsk2 handshake and transport data path as an initiator, and
-interoperates with a real `wg` peer.
+dependency. It speaks three protocols: **IKEv2/ESP** (client and server),
+**WireGuard** (client and server), and **OpenVPN** (client). The IKEv2 side
+performs the full key exchange with pre-shared-key or EAP-MSCHAPv2
+authentication, NAT traversal, and configuration mode (address assignment), then
+runs an ESP-in-UDP data path over a TUN device — so a standards-compliant OS VPN
+client can connect to the server, and the bundled client can connect to it (or
+any RFC 7296 responder). The WireGuard side performs the Noise_IKpsk2 handshake
+and transport data path as both initiator and responder, and interoperates with
+a real `wg` peer. The OpenVPN side is a UDP client that speaks the TLS control
+channel and AES-256-GCM data channel, and interoperates with a stock `openvpn`
+server.
 
 Every layer is covered by tests, including full VPN integration tests:
 `TestFullVPNFlow` drives a client through the handshake and verifies a real IP
@@ -43,6 +46,16 @@ drives the production client against the live server and checks bidirectional ES
   in Docker, both ways. Rekey is client-initiated only (the server answers new
   initiations but starts none of its own), and neither role answers cookie
   replies under load — both fail loudly rather than silently.
+- **OpenVPN client**: the full UDP client path — the hard-reset and reliable
+  control channel (packet IDs, ACKs, retransmission, in-order delivery), the TLS
+  control channel with mutual certificate authentication, the key method 2
+  exchange and TLS 1.0 PRF key derivation, cipher negotiation, the
+  `PUSH_REQUEST`/`PUSH_REPLY` config pull, and the AES-256-GCM `P_DATA_V2` data
+  channel with a sliding-window anti-replay filter and keepalive pings. It reads
+  the common `.ovpn` profile (or flags) and is verified against a stock
+  `openvpn` server in Docker. It targets the modern UDP/TLS/AES-256-GCM profile:
+  tls-auth/tls-crypt control wrapping, compression, and non-GCM ciphers are not
+  implemented, and an unsupported profile fails at dial rather than silently.
 
 ## Cryptography
 
@@ -95,6 +108,7 @@ cmd/veepin               CLI: connect / serve / probe subcommands, flags, routin
 client                   protocol registry + the Session/Result contract
 ikev2                    public IKEv2 entry point: Dial, NewServer, Config
 wireguard                public WireGuard entry point: Dial, Config, wg-quick parser
+openvpn                  public OpenVPN entry point: Dial, Config, .ovpn parser
 
 dataplane                TUN device, address pool, packet pump (demux + routing), client routing
 internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers, ChaCha20-Poly1305, BLAKE2s
@@ -108,6 +122,12 @@ internal/ikev2/ike       negotiation, SK seal/open, NAT-T, CP, exchange handlers
 internal/wireguard/wire      message codec: the four types, fixed layouts, demux, TAI64N
 internal/wireguard/noise     Noise_IKpsk2 handshake (initiator), KDF, MAC
 internal/wireguard/transport type-4 transport crypto: counter nonce, padding, replay window
+
+internal/openvpn/wire        packet codec: opcode byte, session IDs, control/ACK framing
+internal/openvpn/reliable    control-channel reliability: window, retransmit, reorder, ACKs
+internal/openvpn/control     TLS control channel: a net.Conn over the reliability layer
+internal/openvpn/keys        key method 2 exchange + TLS 1.0 PRF key derivation
+internal/openvpn/data        AES-256-GCM P_DATA_V2 seal/open + anti-replay window
 ```
 
 `dataplane` and `internal/cryptoutil` are protocol-agnostic: neither imports anything
@@ -284,6 +304,29 @@ source), and replayed handshake initiations are rejected by their timestamp. A
 veepin client rekeys on its own — re-running the handshake roughly every two
 minutes and rotating the new keypair in without dropping traffic — so a tunnel
 stays up indefinitely; see the note under [What it does](#what-it-does).
+
+### Connecting as an OpenVPN client
+
+`veepin connect openvpn` dials an OpenVPN server as a UDP client. It takes a
+standard `.ovpn` profile, individual flags, or both:
+
+```sh
+# From an .ovpn profile (remote, ca/cert/key, cipher — inline blocks or paths):
+sudo ./veepin connect openvpn -config /etc/openvpn/client.ovpn
+
+# Or from flags with PEM files:
+sudo ./veepin connect openvpn \
+  -remote vpn.example.com -port 1194 \
+  -ca ca.crt -cert client.crt -key client.key
+```
+
+The client runs mutual-TLS with the server (verifying the server certificate
+chains to the CA), negotiates AES-256-GCM, pulls its address and routes from the
+server's `PUSH_REPLY`, and applies them the same way the other protocols do
+(`-full-tunnel`/`-no-route` behave identically). It targets the modern
+UDP/TLS/AES-256-GCM profile; see the boundaries under
+[What it does](#what-it-does). Add `-username`/`-password` for servers that
+require `auth-user-pass`.
 
 ## Connecting an OS client
 
