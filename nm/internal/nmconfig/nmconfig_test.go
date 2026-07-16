@@ -121,6 +121,84 @@ func TestParseMissingRequired(t *testing.T) {
 	}
 }
 
+// TestParseWireGuard covers the second protocol's data/secret mapping and its
+// distinct required keys.
+func TestParseWireGuard(t *testing.T) {
+	c, err := Parse(settings(
+		map[string]string{
+			KeyProtocol: "wireguard", KeyPublicKey: "pub", KeyEndpoint: "h:51820",
+			KeyAddress: "10.0.0.2/32", KeyAllowedIPs: "0.0.0.0/0",
+		},
+		map[string]string{KeyPrivateKey: "priv", KeyPresharedKey: "psk"},
+	))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Protocol != "wireguard" {
+		t.Errorf("protocol = %q, want wireguard", c.Protocol)
+	}
+	// Data and secrets both reach the protocol untranslated.
+	for k, want := range map[string]string{
+		KeyPublicKey: "pub", KeyEndpoint: "h:51820", KeyAddress: "10.0.0.2/32",
+		KeyAllowedIPs: "0.0.0.0/0", KeyPrivateKey: "priv", KeyPresharedKey: "psk",
+	} {
+		if c.Options[k] != want {
+			t.Errorf("option %q = %q, want %q", k, c.Options[k], want)
+		}
+	}
+}
+
+// TestParseWireGuardRequired checks the missing-key rejection, and that a
+// wg-quick config file excuses the individual keys.
+func TestParseWireGuardRequired(t *testing.T) {
+	base := map[string]string{
+		KeyProtocol: "wireguard", KeyPublicKey: "pub", KeyEndpoint: "h:1",
+		KeyAddress: "10.0.0.2/32", KeyAllowedIPs: "0.0.0.0/0",
+	}
+	for _, drop := range []string{KeyPublicKey, KeyEndpoint, KeyAddress, KeyAllowedIPs} {
+		data := map[string]string{}
+		for k, v := range base {
+			if k != drop {
+				data[k] = v
+			}
+		}
+		if _, err := Parse(settings(data, map[string]string{KeyPrivateKey: "priv"})); err == nil {
+			t.Errorf("missing %q was accepted", drop)
+		}
+	}
+	// A config file stands in for all of them.
+	if _, err := Parse(settings(
+		map[string]string{KeyProtocol: "wireguard", KeyConfig: "/etc/wireguard/wg0.conf"},
+		map[string]string{},
+	)); err != nil {
+		t.Errorf("config file should satisfy the requirements: %v", err)
+	}
+}
+
+// TestMissingSecretWireGuard checks that the private key is a required secret,
+// unless a config file supplies it.
+func TestMissingSecretWireGuard(t *testing.T) {
+	data := map[string]string{
+		KeyProtocol: "wireguard", KeyPublicKey: "pub", KeyEndpoint: "h:1",
+		KeyAddress: "10.0.0.2/32", KeyAllowedIPs: "0.0.0.0/0",
+	}
+	// Private key present: satisfied.
+	if got, err := MissingSecret(settings(data, map[string]string{KeyPrivateKey: "priv"})); err != nil || got != "" {
+		t.Errorf("private key present: got %q, err %v", got, err)
+	}
+	// Private key missing: needs "vpn".
+	if got, _ := MissingSecret(settings(data, map[string]string{})); got != "vpn" {
+		t.Errorf("private key missing: got %q, want vpn", got)
+	}
+	// A config file carries its own keys, so no NM secret is required.
+	if got, err := MissingSecret(settings(
+		map[string]string{KeyProtocol: "wireguard", KeyConfig: "/etc/wireguard/wg0.conf"},
+		map[string]string{},
+	)); err != nil || got != "" {
+		t.Errorf("config file: got %q, err %v", got, err)
+	}
+}
+
 func TestParseBadPort(t *testing.T) {
 	if _, err := Parse(settings(
 		map[string]string{KeyGateway: "g", KeyLocalID: "id", KeyPort: "notanumber"},

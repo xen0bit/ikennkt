@@ -12,6 +12,7 @@ package nmconfig
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 
 	"github.com/godbus/dbus/v5"
@@ -34,7 +35,8 @@ type Connection struct {
 	MTU        int               // 0 = use the client's default tunnel MTU
 }
 
-// Data-dictionary keys recognised in vpn.data.
+// Data-dictionary keys recognised in vpn.data. The protocol-option names match
+// the protocol packages' Opt* constants, so they pass through untranslated.
 const (
 	KeyProtocol   = "protocol" // which VPN protocol to dial; default "ikev2"
 	KeyGateway    = "gateway"
@@ -44,12 +46,23 @@ const (
 	KeyUser       = "user"
 	KeyFullTunnel = "full-tunnel" // "yes"/"no", default "yes"
 	KeyMTU        = "mtu"         // optional inner-interface MTU override
+
+	// WireGuard, non-secret.
+	KeyConfig     = "config"      // path to a wg-quick file (substitutes for the keys below)
+	KeyPublicKey  = "public-key"  // peer static public key
+	KeyEndpoint   = "endpoint"    // peer host:port
+	KeyAddress    = "address"     // our tunnel address(es)
+	KeyAllowedIPs = "allowed-ips" // destinations routed to the peer
 )
 
 // Secret keys recognised in vpn.secrets.
 const (
 	KeyPSK      = "psk"
 	KeyPassword = "password"
+
+	// WireGuard secrets.
+	KeyPrivateKey   = "private-key"   // our static private key
+	KeyPresharedKey = "preshared-key" // optional preshared key
 )
 
 // nmOnlyKeys are consumed by the plugin itself and are not protocol options.
@@ -107,9 +120,7 @@ func protocolOptions(data, secrets map[string]string) map[string]string {
 			opts[k] = v
 		}
 	}
-	for k, v := range secrets {
-		opts[k] = v
-	}
+	maps.Copy(opts, secrets)
 	return opts
 }
 
@@ -117,15 +128,26 @@ func protocolOptions(data, secrets map[string]string) map[string]string {
 func requireKeys(protocol string, opts map[string]string) error {
 	switch protocol {
 	case "ikev2":
-		for _, k := range []string{KeyGateway, KeyLocalID} {
-			if opts[k] == "" {
-				return fmt.Errorf("nmconfig: missing required %q", k)
-			}
+		return requirePresent(opts, KeyGateway, KeyLocalID)
+	case "wireguard":
+		// A wg-quick file carries everything, so it excuses the individual keys.
+		if opts[KeyConfig] != "" {
+			return nil
 		}
-		return nil
+		return requirePresent(opts, KeyPublicKey, KeyEndpoint, KeyAddress, KeyAllowedIPs)
 	default:
 		return fmt.Errorf("nmconfig: unsupported %q: %q", KeyProtocol, protocol)
 	}
+}
+
+// requirePresent reports the first of keys missing from opts.
+func requirePresent(opts map[string]string, keys ...string) error {
+	for _, k := range keys {
+		if opts[k] == "" {
+			return fmt.Errorf("nmconfig: missing required %q", k)
+		}
+	}
+	return nil
 }
 
 // MissingSecret reports the name of the setting whose secrets NM must still
@@ -144,6 +166,13 @@ func MissingSecret(s Settings) (string, error) {
 			return "vpn", nil
 		}
 		if conn.Options[KeyUser] != "" && conn.Options[KeyPassword] == "" {
+			return "vpn", nil
+		}
+		return "", nil
+	case "wireguard":
+		// A wg-quick file holds its own keys; otherwise the private key is a
+		// required secret. The preshared key is optional.
+		if conn.Options[KeyConfig] == "" && conn.Options[KeyPrivateKey] == "" {
 			return "vpn", nil
 		}
 		return "", nil

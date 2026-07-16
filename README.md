@@ -2,11 +2,14 @@
 
 A **working userspace VPN in Go** — both a server (responder) and a client
 (initiator) — written from scratch, with `golang.org/x/crypto` the only
-dependency. It performs the full IKEv2 key exchange with pre-shared-key or
-EAP-MSCHAPv2 authentication, NAT traversal, and IKEv2 configuration mode (address
-assignment), then runs an ESP-in-UDP data path over a TUN device — so a
-standards-compliant OS VPN client can connect to the server, and the bundled
-client can connect to it (or any RFC 7296 responder) and tunnel a host's traffic.
+dependency. It speaks two protocols: **IKEv2/ESP** (client and server) and
+**WireGuard** (client). The IKEv2 side performs the full key exchange with
+pre-shared-key or EAP-MSCHAPv2 authentication, NAT traversal, and configuration
+mode (address assignment), then runs an ESP-in-UDP data path over a TUN device —
+so a standards-compliant OS VPN client can connect to the server, and the bundled
+client can connect to it (or any RFC 7296 responder). The WireGuard side performs
+the Noise_IKpsk2 handshake and transport data path as an initiator, and
+interoperates with a real `wg` peer.
 
 Every layer is covered by tests, including full VPN integration tests:
 `TestFullVPNFlow` drives a client through the handshake and verifies a real IP
@@ -29,6 +32,14 @@ drives the production client against the live server and checks bidirectional ES
 - **Userspace data path**: a TUN device plus an ESP engine (RFC 4303) with a
   64-packet anti-replay window; packets are demuxed by SPI and routed by the
   client's assigned address.
+- **WireGuard client**: the Noise_IKpsk2 handshake (initiator), the
+  ChaCha20-Poly1305 transport data path with a counter nonce and an RFC 6479
+  sliding-window anti-replay filter, cryptokey routing by AllowedIPs, and
+  persistent keepalives. It reads a wg-quick config file (with per-field flag
+  overrides) and is verified against the reference `wireguard-go` in Docker.
+  Milestone 1 is the single-handshake data path: it does not yet rekey (a session
+  lives for the handshake's ~180 s lifetime) or answer cookie replies, both of
+  which fail loudly rather than silently.
 
 ## Cryptography
 
@@ -80,15 +91,20 @@ protocol. IKEv2 is the first protocol; others become siblings under `internal/`.
 cmd/veepin               CLI: connect / serve / probe subcommands, flags, routing
 client                   protocol registry + the Session/Result contract
 ikev2                    public IKEv2 entry point: Dial, NewServer, Config
+wireguard                public WireGuard entry point: Dial, Config, wg-quick parser
 
 dataplane                TUN device, address pool, packet pump (demux + routing), client routing
-internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers
+internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers, ChaCha20-Poly1305, BLAKE2s
 
 internal/ikev2/payload   wire codec: header, payloads, SA/KE/Nonce/Notify/ID/AUTH/TS/Delete/CP
 internal/ikev2/transform IANA transform ID -> cryptoutil primitive
 internal/ikev2/eap       EAP packet codec + EAP-MSCHAPv2 (MD4/DES/SHA1, MSK derivation)
 internal/ikev2/esp       ESP encapsulate/decapsulate + anti-replay
 internal/ikev2/ike       negotiation, SK seal/open, NAT-T, CP, exchange handlers, keymat, Client
+
+internal/wireguard/wire      message codec: the four types, fixed layouts, demux, TAI64N
+internal/wireguard/noise     Noise_IKpsk2 handshake (initiator), KDF, MAC
+internal/wireguard/transport type-4 transport crypto: counter nonce, padding, replay window
 ```
 
 `dataplane` and `internal/cryptoutil` are protocol-agnostic: neither imports anything
@@ -140,8 +156,8 @@ veepin serve   <protocol> [flags]   run a VPN server
 veepin probe   <protocol> [flags]   diagnostic: handshake + one data packet
 ```
 
-IKEv2 is currently the only protocol; `veepin` with no arguments lists what is
-registered.
+IKEv2 (`connect`/`serve`) and WireGuard (`connect`) are the built-in protocols;
+`veepin` with no arguments lists what is registered.
 
 ## Run
 
@@ -208,6 +224,37 @@ then authenticates with its username/password. This is the standard
 support out of the box. Note that MSCHAPv2 requires the server to hold
 recoverable passwords (challenge/response cannot verify against a salted one-way
 hash); protect the credential file accordingly.
+
+### Connecting as a WireGuard client
+
+`veepin connect wireguard` dials a WireGuard peer as an initiator. It takes a
+wg-quick config file, individual flags, or both — a flag overrides the file's
+value for the same field, so a checked-in config can carry a per-run override:
+
+```sh
+# From a wg-quick file (the same format `wg-quick` and the mobile apps use):
+sudo ./veepin connect wireguard -config /etc/wireguard/wg0.conf
+
+# Or entirely from flags:
+sudo ./veepin connect wireguard \
+  -private-key "$(wg genkey | tee privkey)" \
+  -public-key SERVER_PUBLIC_KEY_BASE64 \
+  -endpoint vpn.example.com:51820 \
+  -address 10.0.0.2/32 \
+  -allowed-ips 0.0.0.0/0 \
+  -persistent-keepalive 25
+```
+
+The config's `AllowedIPs` become the tunnel's routes: a packet leaving the TUN
+goes to the peer whose AllowedIPs match its destination most specifically, the
+same cryptokey-routing rule WireGuard defines. As with IKEv2, `connect` applies
+addressing and routing to the system, and `-no-route` brings the tunnel up
+without touching either (useful for diagnostics).
+
+This is a client (initiator) only: there is no `veepin serve wireguard` yet. It
+carries traffic under a single handshake and does not rekey, so a long-lived
+session must be re-dialed roughly every three minutes; see the milestone note
+under [What it does](#what-it-does).
 
 ## Connecting an OS client
 
@@ -409,6 +456,10 @@ What's measured:
   decapsulate and full round-trip, and the pump's inbound demux+decap+TUN path,
   across 64/576/1400-byte packets for AES-GCM (128/256) and AES-CBC+HMAC.
   Reported in MB/s via `b.SetBytes`.
+- **WireGuard transport** (`internal/wireguard/transport`) — the type-4 seal and
+  open paths (ChaCha20-Poly1305 with a counter nonce, padding, and the anti-replay
+  window) across the same packet sizes. Open decrypts in place at a single
+  allocation, ~1.9 GB/s at 1400 B — on par with the AES-GCM ESP path.
 - **Handshake** (`internal/ikev2/ike`) — SK message seal/open, and a full PSK
   handshake (IKE_SA_INIT + IKE_AUTH) over real UDP loopback against the live
   server.

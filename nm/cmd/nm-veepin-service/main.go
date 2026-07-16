@@ -20,6 +20,7 @@ import (
 	// Without the import the binary still links, and every Connect fails at
 	// runtime with "unknown protocol" — so a new protocol must be added here.
 	_ "github.com/xen0bit/veepin/ikev2"
+	_ "github.com/xen0bit/veepin/wireguard"
 )
 
 func main() {
