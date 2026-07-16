@@ -36,11 +36,13 @@ drives the production client against the live server and checks bidirectional ES
   responder), the ChaCha20-Poly1305 transport data path with a counter nonce and
   an RFC 6479 sliding-window anti-replay filter, cryptokey routing by AllowedIPs
   in both directions, multi-peer servers, roaming, replay-checked handshake
-  timestamps, and persistent keepalives. It reads a wg-quick config file (with
+  timestamps, persistent keepalives, and client-initiated rekeying that keeps a
+  tunnel up indefinitely by rotating a fresh keypair in before the current one
+  reaches its ~180 s rejection age. It reads a wg-quick config file (with
   per-field flag overrides) and is verified against the reference `wireguard-go`
-  in Docker, both ways. It does not yet rekey (a session lives for the handshake's
-  ~180 s lifetime) or answer cookie replies under load, both of which fail loudly
-  rather than silently.
+  in Docker, both ways. Rekey is client-initiated only (the server answers new
+  initiations but starts none of its own), and neither role answers cookie
+  replies under load — both fail loudly rather than silently.
 
 ## Cryptography
 
@@ -279,8 +281,9 @@ Cryptokey routing runs both ways: `AllowedIPs` selects which peer an outbound
 packet goes to, and an inbound packet whose source is outside a peer's
 `AllowedIPs` is dropped. Peers roam (the return address follows each packet's
 source), and replayed handshake initiations are rejected by their timestamp. A
-session does not rekey, so a peer re-handshakes roughly every three minutes; see
-the note under [What it does](#what-it-does).
+veepin client rekeys on its own — re-running the handshake roughly every two
+minutes and rotating the new keypair in without dropping traffic — so a tunnel
+stays up indefinitely; see the note under [What it does](#what-it-does).
 
 ## Connecting an OS client
 

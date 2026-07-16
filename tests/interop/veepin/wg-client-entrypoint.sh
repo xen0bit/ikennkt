@@ -9,10 +9,19 @@
 # up; if the server is not ready it fails fast, so we retry until it answers.
 set -u
 
+# REKEY_SECONDS, when set, shrinks the client's rekey interval from the protocol
+# default (120s) so a test can watch a tunnel survive several key rotations in a
+# short window. Unset leaves the default.
+rekey_flag=""
+if [ -n "${REKEY_SECONDS:-}" ]; then
+    rekey_flag="-rekey-seconds ${REKEY_SECONDS}"
+fi
+
 echo "veepin-wg-client: connecting to ${SERVER}:51820 (endpoint), tun ${CLIENT_TUN_IP}"
 
 i=1
 while [ "$i" -le 30 ]; do
+    # shellcheck disable=SC2086
     veepin connect wireguard \
         -private-key "$CLIENT_PRIVATE" \
         -public-key "$SERVER_PUBLIC" \
@@ -21,6 +30,7 @@ while [ "$i" -le 30 ]; do
         -address "${CLIENT_TUN_IP}/24" \
         -allowed-ips "${SERVER_TUN_IP}/32" \
         -persistent-keepalive 15 \
+        $rekey_flag \
         -tun tun0 \
         -full-tunnel=false
     echo "veepin-wg-client: attempt $i failed; retrying in 2s"

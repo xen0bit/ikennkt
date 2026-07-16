@@ -65,6 +65,70 @@ func TestInteropWireguardSelf(t *testing.T) {
 	runInterop(t, "compose.wireguard-self.yml", "veepin-wg-client", "10.10.10.1")
 }
 
+// TestInteropWireguardRekey proves the client rekey loop end to end: the veepin
+// client re-runs the handshake every few seconds (a shrunk REKEY_SECONDS),
+// rotating a fresh keypair and receiver index into a live tunnel, while a
+// sustained ping runs across those rotations. Zero packet loss shows the
+// keypair-set data path holds the tunnel open through each rekey, and the
+// server's repeated handshakes show the rekeys are real rather than one session
+// coasting under its original key.
+func TestInteropWireguardRekey(t *testing.T) {
+	requireDocker(t)
+	const file = "compose.wireguard-rekey.yml"
+
+	if out, err := compose(t, file, "up", "--build", "-d"); err != nil {
+		t.Fatalf("compose up: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		if t.Failed() {
+			if logs, err := compose(t, file, "logs", "--no-color"); err == nil {
+				t.Logf("--- compose logs (%s) ---\n%s", file, logs)
+			}
+		}
+		_, _ = compose(t, file, "down", "-v", "--timeout", "5")
+	})
+
+	// 1. Wait for the tunnel to come up (first successful ping).
+	if !waitPing(t, file, "veepin-wg-client", "10.10.10.1") {
+		t.Fatalf("tunnel never came up within %s", pingDeadline)
+	}
+
+	// 2. Sustain traffic across several rekey intervals. With REKEY_SECONDS=8, a
+	// ~48-second ping spans roughly six key rotations; a break in the data path
+	// across any receiver-index change would surface as loss here.
+	out, err := compose(t, file, "exec", "-T", "veepin-wg-client",
+		"ping", "-c", "48", "-i", "1", "-W", "2", "10.10.10.1")
+	if err != nil || !strings.Contains(out, "0% packet loss") {
+		t.Fatalf("sustained ping across rekeys lost packets: %v\n%s", err, out)
+	}
+
+	// 3. Confirm the rekeys actually happened: the server completes a fresh
+	// handshake for each, so its log carries several "handshake complete" lines.
+	logs, err := compose(t, file, "logs", "--no-color", "veepin-wg-server")
+	if err != nil {
+		t.Fatalf("reading server logs: %v", err)
+	}
+	if n := strings.Count(logs, "handshake complete"); n < 3 {
+		t.Fatalf("server logged %d handshakes, want >=3 (rekeys not happening):\n%s", n, logs)
+	}
+}
+
+// waitPing retries a short ping from pingSvc to target until one reports no loss
+// or pingDeadline elapses, reporting whether the tunnel came up.
+func waitPing(t *testing.T, composeFile, pingSvc, target string) bool {
+	t.Helper()
+	deadline := time.Now().Add(pingDeadline)
+	for time.Now().Before(deadline) {
+		out, err := compose(t, composeFile, "exec", "-T", pingSvc,
+			"ping", "-c2", "-W2", target)
+		if err == nil && strings.Contains(out, "0% packet loss") {
+			return true
+		}
+		time.Sleep(3 * time.Second)
+	}
+	return false
+}
+
 // runInterop brings up the given compose file, then retries a ping from pingSvc
 // to target across the tunnel until it succeeds or pingDeadline elapses. A
 // successful ping proves the full path: handshake, config-mode addressing, and
