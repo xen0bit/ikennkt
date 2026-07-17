@@ -1,0 +1,400 @@
+package ppp
+
+import (
+	"crypto/rand"
+	"encoding/binary"
+	"fmt"
+	"net"
+	"sync"
+
+	"github.com/xen0bit/veepin/internal/mschap"
+)
+
+// LCP option types (RFC 1661 section 6).
+const (
+	optMRU       = 1
+	optAuthProto = 3
+	optQuality   = 4
+	optMagic     = 5
+	optPFC       = 7
+	optACFC      = 8
+)
+
+// IPCP option types (RFC 1332).
+const (
+	optIPAddress    = 3
+	optPrimaryDNS   = 0x81
+	optSecondaryDNS = 0x83
+)
+
+// authMSCHAPv2 is the LCP Auth-Protocol option value for MS-CHAPv2: the CHAP
+// protocol number followed by the MS-CHAPv2 algorithm identifier.
+var authMSCHAPv2 = []byte{0xc2, 0x23, 0x81}
+
+// defaultMRU is the maximum receive unit the client advertises, comfortably
+// inside a TLS record over a typical path.
+const defaultMRU = 1400
+
+// IPConfig is the network configuration IPCP assigns the client.
+type IPConfig struct {
+	LocalIP net.IP
+	DNS     []net.IP
+}
+
+// Handler receives the PPP session's lifecycle events. The SSTP layer implements
+// it: on Authenticated it computes the crypto binding and sends Call Connected,
+// and on NetworkUp the tunnel is ready to carry IP.
+type Handler interface {
+	Authenticated(ntResponse [mschap.NTResponseLen]byte)
+	NetworkUp(cfg IPConfig)
+	Closed(err error)
+}
+
+// Transport sends a fully-framed PPP packet; the SSTP layer wraps it in a data
+// packet on the TLS connection.
+type Transport interface {
+	SendPPP(frame []byte) error
+}
+
+type phase int
+
+const (
+	phaseLCP phase = iota
+	phaseAuth
+	phaseIPCP
+	phaseUp
+	phaseClosed
+)
+
+// Session is a PPP client link: it negotiates LCP, authenticates with
+// MS-CHAPv2, and negotiates IPCP, then carries IP. It assumes a reliable,
+// in-order transport (SSTP over TLS/TCP), so it drives its state machine purely
+// from received packets without retransmission timers.
+type Session struct {
+	username, password string
+	tr                 Transport
+	h                  Handler
+
+	mu    sync.Mutex
+	phase phase
+	magic uint32
+	reqID byte
+
+	lcpReqID                    byte
+	lcpLocalOpen, lcpRemoteOpen bool
+
+	ipcpReqID                     byte
+	ipcpLocalOpen, ipcpRemoteOpen bool
+	reqIP, reqDNS1, reqDNS2       net.IP
+
+	authChallenge, peerChallenge [mschap.ChallengeLen]byte
+	ntResponse                   [mschap.NTResponseLen]byte
+}
+
+// New builds a PPP client session that authenticates as username/password,
+// sends frames through tr, and reports events to h.
+func New(username, password string, tr Transport, h Handler) *Session {
+	var magic [4]byte
+	_, _ = rand.Read(magic[:])
+	return &Session{
+		username: username,
+		password: password,
+		tr:       tr,
+		h:        h,
+		magic:    binary.BigEndian.Uint32(magic[:]),
+	}
+}
+
+// Start opens the link by sending the initial LCP Configure-Request.
+func (s *Session) Start() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sendLCPConfigReq()
+}
+
+// Receive dispatches one inbound PPP frame by protocol. The SSTP layer calls it
+// for every data-packet payload during negotiation, and for control frames once
+// the tunnel is up.
+func (s *Session) Receive(frame []byte) {
+	protocol, payload, ok := decodeFrame(frame)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.phase == phaseClosed {
+		return
+	}
+	switch protocol {
+	case ProtocolLCP:
+		s.handleLCP(payload)
+	case ProtocolCHAP:
+		s.handleCHAP(payload)
+	case ProtocolIPCP:
+		s.handleIPCP(payload)
+	}
+}
+
+// IsIP reports whether a received PPP frame carries an IP packet, and returns
+// it. The SSTP tunnel uses this to split inbound data between the TUN and the
+// PPP control machinery once the link is up.
+func IsIP(frame []byte) ([]byte, bool) {
+	protocol, payload, ok := decodeFrame(frame)
+	if !ok || protocol != ProtocolIP {
+		return nil, false
+	}
+	return payload, true
+}
+
+// EncapsulateIP frames an outbound IP packet as a PPP frame for a data packet.
+func EncapsulateIP(ipPacket []byte) []byte {
+	return encodeFrame(ProtocolIP, ipPacket)
+}
+
+func (s *Session) send(protocol uint16, payload []byte) {
+	if err := s.tr.SendPPP(encodeFrame(protocol, payload)); err != nil {
+		s.failLocked(fmt.Errorf("ppp: send: %w", err))
+	}
+}
+
+func (s *Session) nextID() byte {
+	s.reqID++
+	return s.reqID
+}
+
+func (s *Session) failLocked(err error) {
+	if s.phase == phaseClosed {
+		return
+	}
+	s.phase = phaseClosed
+	s.h.Closed(err)
+}
+
+// --- LCP ---
+
+func (s *Session) sendLCPConfigReq() {
+	var magic [4]byte
+	binary.BigEndian.PutUint32(magic[:], s.magic)
+	var mru [2]byte
+	binary.BigEndian.PutUint16(mru[:], defaultMRU)
+	opts := []option{
+		{Type: optMRU, Value: mru[:]},
+		{Type: optMagic, Value: magic[:]},
+	}
+	s.lcpReqID = s.nextID()
+	s.send(ProtocolLCP, cpPacket{Code: codeConfigureRequest, ID: s.lcpReqID, Body: marshalOptions(opts)}.marshal())
+}
+
+func (s *Session) handleLCP(payload []byte) {
+	pkt, ok := parseCP(payload)
+	if !ok {
+		return
+	}
+	switch pkt.Code {
+	case codeConfigureRequest:
+		s.handleLCPConfigReq(pkt)
+	case codeConfigureAck:
+		if pkt.ID == s.lcpReqID {
+			s.lcpLocalOpen = true
+			s.maybeLCPUp()
+		}
+	case codeConfigureNak, codeConfigureReject:
+		// Our request is only MRU + Magic; drop nothing essential and resend so
+		// the peer sees a request it can accept.
+		s.sendLCPConfigReq()
+	case codeTerminateRequest:
+		s.send(ProtocolLCP, cpPacket{Code: codeTerminateAck, ID: pkt.ID}.marshal())
+		s.failLocked(fmt.Errorf("ppp: peer closed the link"))
+	case codeEchoRequest:
+		s.sendEchoReply(pkt)
+	}
+}
+
+func (s *Session) handleLCPConfigReq(pkt cpPacket) {
+	opts, ok := parseOptions(pkt.Body)
+	if !ok {
+		return
+	}
+	var rejected []option
+	authOK := false
+	for _, o := range opts {
+		switch o.Type {
+		case optMRU, optMagic, optQuality, optPFC, optACFC:
+			// Acceptable: we send full frames regardless, so compression options
+			// only permit, never require, and cost us nothing to accept.
+		case optAuthProto:
+			if string(o.Value) == string(authMSCHAPv2) {
+				authOK = true
+			} else {
+				rejected = append(rejected, o)
+			}
+		default:
+			rejected = append(rejected, o)
+		}
+	}
+	if len(rejected) > 0 {
+		s.send(ProtocolLCP, cpPacket{Code: codeConfigureReject, ID: pkt.ID, Body: marshalOptions(rejected)}.marshal())
+		if !authOK {
+			// The peer demanded an auth protocol we do not implement; rejecting it
+			// will not converge.
+			s.failLocked(fmt.Errorf("ppp: server requires an unsupported auth protocol"))
+		}
+		return
+	}
+	s.send(ProtocolLCP, cpPacket{Code: codeConfigureAck, ID: pkt.ID, Body: pkt.Body}.marshal())
+	s.lcpRemoteOpen = true
+	s.maybeLCPUp()
+}
+
+func (s *Session) sendEchoReply(req cpPacket) {
+	var magic [4]byte
+	binary.BigEndian.PutUint32(magic[:], s.magic)
+	// Echo-Reply body is our magic number followed by the request's data.
+	body := magic[:]
+	if len(req.Body) >= 4 {
+		body = append(magic[:], req.Body[4:]...)
+	}
+	s.send(ProtocolLCP, cpPacket{Code: codeEchoReply, ID: req.ID, Body: body}.marshal())
+}
+
+func (s *Session) maybeLCPUp() {
+	if s.phase == phaseLCP && s.lcpLocalOpen && s.lcpRemoteOpen {
+		s.phase = phaseAuth // wait for the server's MS-CHAPv2 challenge
+	}
+}
+
+// --- MS-CHAPv2 authentication ---
+
+func (s *Session) handleCHAP(payload []byte) {
+	pkt, ok := parseCP(payload)
+	if !ok {
+		return
+	}
+	switch pkt.Code {
+	case chapChallenge:
+		ac, _, ok := parseChallenge(pkt.Body)
+		if !ok {
+			s.failLocked(fmt.Errorf("ppp: malformed MS-CHAPv2 challenge"))
+			return
+		}
+		s.authChallenge = ac
+		body, pc, nt, err := buildResponse(ac, s.username, s.password)
+		if err != nil {
+			s.failLocked(err)
+			return
+		}
+		s.peerChallenge, s.ntResponse = pc, nt
+		s.send(ProtocolCHAP, cpPacket{Code: chapResponse, ID: pkt.ID, Body: body}.marshal())
+	case chapSuccess:
+		if err := verifySuccess(pkt.Body, s.authChallenge, s.peerChallenge, s.username, s.password, s.ntResponse); err != nil {
+			s.failLocked(err)
+			return
+		}
+		s.h.Authenticated(s.ntResponse)
+		s.phase = phaseIPCP
+		s.startIPCP()
+	case chapFailure:
+		s.failLocked(fmt.Errorf("ppp: authentication failed: %s", failureMessage(pkt.Body)))
+	}
+}
+
+// --- IPCP ---
+
+func (s *Session) startIPCP() {
+	s.reqIP = net.IPv4zero.To4()
+	s.reqDNS1 = net.IPv4zero.To4()
+	s.reqDNS2 = net.IPv4zero.To4()
+	s.sendIPCPConfigReq()
+}
+
+func (s *Session) sendIPCPConfigReq() {
+	opts := []option{{Type: optIPAddress, Value: s.reqIP}}
+	if s.reqDNS1 != nil {
+		opts = append(opts, option{Type: optPrimaryDNS, Value: s.reqDNS1})
+	}
+	if s.reqDNS2 != nil {
+		opts = append(opts, option{Type: optSecondaryDNS, Value: s.reqDNS2})
+	}
+	s.ipcpReqID = s.nextID()
+	s.send(ProtocolIPCP, cpPacket{Code: codeConfigureRequest, ID: s.ipcpReqID, Body: marshalOptions(opts)}.marshal())
+}
+
+func (s *Session) handleIPCP(payload []byte) {
+	pkt, ok := parseCP(payload)
+	if !ok {
+		return
+	}
+	switch pkt.Code {
+	case codeConfigureRequest:
+		// Accept the server's own IPCP options (its inner address); we route by the
+		// transport address, not this one.
+		s.send(ProtocolIPCP, cpPacket{Code: codeConfigureAck, ID: pkt.ID, Body: pkt.Body}.marshal())
+		s.ipcpRemoteOpen = true
+		s.maybeIPCPUp()
+	case codeConfigureAck:
+		if pkt.ID == s.ipcpReqID {
+			s.ipcpLocalOpen = true
+			s.maybeIPCPUp()
+		}
+	case codeConfigureNak:
+		s.adoptIPCPValues(pkt.Body)
+		s.sendIPCPConfigReq()
+	case codeConfigureReject:
+		s.dropRejectedIPCP(pkt.Body)
+		s.sendIPCPConfigReq()
+	}
+}
+
+// adoptIPCPValues takes the addresses the server suggested in a Configure-Nak
+// and resubmits them, which is how the client learns its assigned IP and DNS.
+func (s *Session) adoptIPCPValues(body []byte) {
+	opts, ok := parseOptions(body)
+	if !ok {
+		return
+	}
+	for _, o := range opts {
+		if len(o.Value) != 4 {
+			continue
+		}
+		v := net.IP(append([]byte(nil), o.Value...))
+		switch o.Type {
+		case optIPAddress:
+			s.reqIP = v
+		case optPrimaryDNS:
+			s.reqDNS1 = v
+		case optSecondaryDNS:
+			s.reqDNS2 = v
+		}
+	}
+}
+
+// dropRejectedIPCP removes options the server rejected (commonly the DNS
+// requests) so the resent request can converge.
+func (s *Session) dropRejectedIPCP(body []byte) {
+	opts, ok := parseOptions(body)
+	if !ok {
+		return
+	}
+	for _, o := range opts {
+		switch o.Type {
+		case optPrimaryDNS:
+			s.reqDNS1 = nil
+		case optSecondaryDNS:
+			s.reqDNS2 = nil
+		}
+	}
+}
+
+func (s *Session) maybeIPCPUp() {
+	if s.phase != phaseIPCP || !s.ipcpLocalOpen || !s.ipcpRemoteOpen {
+		return
+	}
+	s.phase = phaseUp
+	cfg := IPConfig{LocalIP: s.reqIP}
+	for _, d := range []net.IP{s.reqDNS1, s.reqDNS2} {
+		if d != nil && !d.Equal(net.IPv4zero) {
+			cfg.DNS = append(cfg.DNS, d)
+		}
+	}
+	s.h.NetworkUp(cfg)
+}
