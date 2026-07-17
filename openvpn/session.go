@@ -81,11 +81,18 @@ func (m *muxer) Close() {
 	})
 }
 
+// dataCipher is the data-channel crypto the tunnel drives: either the AES-256-GCM
+// Cipher or the AES-256-CBC CBCCipher, chosen by the negotiated cipher.
+type dataCipher interface {
+	Seal(plaintext []byte) ([]byte, error)
+	Open(pkt []byte) ([]byte, error)
+}
+
 // tunnel is the data-path view of the server connection. It implements
 // dataplane.Tunnel: everything from the TUN is sealed to the one server, and
 // inbound data packets are opened and (if a keepalive ping) dropped.
 type tunnel struct {
-	cipher *data.Cipher
+	cipher dataCipher
 	routes []netip.Prefix
 	peer   atomic.Pointer[net.UDPAddr]
 }
@@ -180,6 +187,7 @@ type pushConfig struct {
 	gateway net.IP
 	peerID  uint32
 	mtu     int
+	cipher  string // the data cipher the server negotiated, if it pushed one
 }
 
 // parsePush decodes a server PUSH_REPLY, extracting the tunnel address, gateway,
@@ -222,8 +230,8 @@ func parsePush(reply string) (*pushConfig, error) {
 				}
 			}
 		case "cipher":
-			if len(fields) >= 2 && !strings.EqualFold(fields[1], defaultCipher) {
-				return nil, fmt.Errorf("server pushed unsupported cipher %q", fields[1])
+			if len(fields) >= 2 {
+				p.cipher = fields[1]
 			}
 		case "tun-mtu":
 			if len(fields) >= 2 {

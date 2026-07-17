@@ -18,12 +18,15 @@
 //
 // # Scope
 //
-// This is a client (initiator) for the common modern profile: UDP transport,
-// TLS with certificates, AES-256-GCM data cipher, and P_DATA_V2 with a
-// server-assigned peer-id. It does not implement tls-auth/tls-crypt control
-// wrapping, compression, or the older net30 topology's assumptions, and it
-// negotiates only AES-256-GCM. These are deliberate boundaries: an unsupported
-// profile fails at dial rather than silently misbehaving.
+// This is a client (initiator) over UDP transport with TLS certificate
+// authentication and P_DATA_V2 (a server-assigned peer-id). It negotiates the
+// AES-256-GCM data cipher by default and also speaks the older AES-256-CBC data
+// channel (encrypt-then-MAC with an --auth HMAC). The control channel can be
+// plain, --tls-auth (an HMAC over every control packet), or --tls-crypt
+// (authenticated encryption of every control packet); the static key is read
+// from the config or a flag. It does not implement compression or the older
+// net30 topology's assumptions, and a profile it cannot speak fails at dial
+// rather than silently misbehaving.
 package openvpn
 
 import (
@@ -38,6 +41,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/xen0bit/veepin/client"
@@ -45,6 +49,7 @@ import (
 	"github.com/xen0bit/veepin/internal/openvpn/control"
 	"github.com/xen0bit/veepin/internal/openvpn/data"
 	"github.com/xen0bit/veepin/internal/openvpn/keys"
+	"github.com/xen0bit/veepin/internal/openvpn/tlswrap"
 	"github.com/xen0bit/veepin/internal/openvpn/wire"
 )
 
@@ -70,7 +75,7 @@ const (
 // if given, layers the individual options over it, and validates. It is what the
 // registry calls for client.Dial(ctx, "openvpn", opts).
 func parseOptions(opts map[string]string) (client.Dialer, error) {
-	cfg := &Config{}
+	cfg := &Config{KeyDirection: -1}
 	if path := opts[OptConfig]; path != "" {
 		loaded, err := ParseConfigFile(path)
 		if err != nil {
@@ -121,8 +126,14 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		return nil, client.Result{}, fmt.Errorf("openvpn: dial %s: %w", endpoint, err)
 	}
 
+	wrap, err := buildWrapper(&cfg)
+	if err != nil {
+		conn.Close()
+		return nil, client.Result{}, fmt.Errorf("openvpn: %w", err)
+	}
+
 	m := &muxer{conn: conn, logger: logger, closed: make(chan struct{})}
-	ch, err := control.New(func(b []byte) error { _, werr := conn.Write(b); return werr }, 0, controlTimeout)
+	ch, err := control.New(func(b []byte) error { _, werr := conn.Write(b); return werr }, 0, controlTimeout, wrap)
 	if err != nil {
 		conn.Close()
 		return nil, client.Result{}, fmt.Errorf("openvpn: control channel: %w", err)
@@ -232,7 +243,7 @@ func negotiate(ctx context.Context, cfg *Config, ch *control.Channel, tlsCfg *tl
 	if err != nil {
 		return client.Result{}, nil, err
 	}
-	if _, err := tlsConn.Write(clientKS.MarshalClient(occOptions(), cfg.Username, cfg.Password, peerInfo())); err != nil {
+	if _, err := tlsConn.Write(clientKS.MarshalClient(occOptions(cfg), cfg.Username, cfg.Password, peerInfo(cfg))); err != nil {
 		return client.Result{}, nil, fmt.Errorf("send key material: %w", err)
 	}
 	serverKS, _, err := readServerKeys(tlsConn)
@@ -244,7 +255,6 @@ func negotiate(ctx context.Context, cfg *Config, ch *control.Channel, tlsCfg *tl
 	remoteSID, _ := ch.RemoteSessionID()
 	serverSID := keys.SessionID(remoteSID)
 	ks2 := &keys.KeySource2{Client: *clientKS, Server: *serverKS}
-	dataKeys := ks2.Derive(clientSID, serverSID, false)
 
 	// Pull the pushed configuration.
 	if _, err := tlsConn.Write([]byte("PUSH_REQUEST\x00")); err != nil {
@@ -261,12 +271,19 @@ func negotiate(ctx context.Context, cfg *Config, ch *control.Channel, tlsCfg *tl
 		return client.Result{}, nil, err
 	}
 
-	cipher, err := data.New(dataKeys, pushed.peerID, 0)
+	// The server's pushed cipher is authoritative under NCP; if it pushes none,
+	// fall back to the configured cipher (an old server using its compiled --cipher).
+	effectiveCipher := cfg.Cipher
+	if pushed.cipher != "" {
+		effectiveCipher = pushed.cipher
+	}
+	dc, err := buildDataCipher(effectiveCipher, cfg, ks2, clientSID, serverSID, pushed.peerID)
 	if err != nil {
 		return client.Result{}, nil, err
 	}
+	logger.Printf("openvpn: data channel cipher %s", effectiveCipher)
 	tun := &tunnel{
-		cipher: cipher,
+		cipher: dc,
 		routes: []netip.Prefix{netip.PrefixFrom(netip.IPv4Unspecified(), 0)},
 	}
 	tun.peer.Store(endpoint)
@@ -328,17 +345,52 @@ func readPushReply(tlsConn *tls.Conn) (string, error) {
 	}
 }
 
+// buildDataCipher constructs the data-channel crypto for the negotiated cipher,
+// deriving the matching key material. The GCM path is the AEAD default; the CBC
+// path derives an HMAC key of the --auth digest's size.
+func buildDataCipher(name string, cfg *Config, ks2 *keys.KeySource2, clientSID, serverSID keys.SessionID, peerID uint32) (dataCipher, error) {
+	switch {
+	case strings.EqualFold(name, cipherGCM):
+		dk := ks2.Derive(clientSID, serverSID, false)
+		return data.New(dk, peerID, 0)
+	case strings.EqualFold(name, cipherCBC):
+		digest, err := tlswrap.ParseDigest(cfg.Auth)
+		if err != nil {
+			return nil, fmt.Errorf("cbc data channel: %w", err)
+		}
+		ck := ks2.DeriveCBC(clientSID, serverSID, false)
+		return data.NewCBC(ck, digest.New, digest.Size, peerID, 0)
+	default:
+		return nil, fmt.Errorf("server negotiated unsupported cipher %q", name)
+	}
+}
+
 // occOptions is the OCC options string. Without --opt-verify on the server it is
-// advisory, so a plausible value suffices.
-func occOptions() string {
-	return "V4,dev-type tun,link-mtu 1549,tun-mtu 1500,proto UDPv4,cipher AES-256-GCM,auth [null-digest],keysize 256,key-method 2,tls-client"
+// advisory, so a plausible value suffices; the cipher and auth fields track the
+// configured data channel.
+func occOptions(cfg *Config) string {
+	authName := "[null-digest]" // GCM authenticates within the AEAD
+	if strings.EqualFold(cfg.Cipher, cipherCBC) {
+		authName = strings.ToUpper(digestName(cfg.Auth))
+	}
+	return fmt.Sprintf("V4,dev-type tun,link-mtu 1549,tun-mtu 1500,proto UDPv4,cipher %s,auth %s,keysize 256,key-method 2,tls-client",
+		strings.ToUpper(cfg.Cipher), authName)
 }
 
 // peerInfo advertises this client's capabilities: P_DATA_V2 support (IV_PROTO
-// bit 1) so the server assigns a peer-id, NCP, and AES-256-GCM as the only data
-// cipher we accept, so the server negotiates it.
-func peerInfo() string {
-	return "IV_VER=2.6.0\nIV_PROTO=2\nIV_NCP=2\nIV_CIPHERS=AES-256-GCM\n"
+// bit 1) so the server assigns a peer-id, NCP, and the configured data cipher, so
+// the server negotiates it.
+func peerInfo(cfg *Config) string {
+	return fmt.Sprintf("IV_VER=2.6.0\nIV_PROTO=2\nIV_NCP=2\nIV_CIPHERS=%s\n", strings.ToUpper(cfg.Cipher))
+}
+
+// digestName returns the --auth digest name, defaulting to SHA1 (OpenVPN's
+// default) when unset.
+func digestName(auth string) string {
+	if auth == "" {
+		return "SHA1"
+	}
+	return auth
 }
 
 // isTLSAuthError reports whether an error is a TLS certificate verification
@@ -346,6 +398,47 @@ func peerInfo() string {
 func isTLSAuthError(err error) bool {
 	var ce *tls.CertificateVerificationError
 	return errors.As(err, &ce)
+}
+
+// buildWrapper builds the control-channel protection from the config: --tls-crypt
+// (encrypt + authenticate) takes precedence over --tls-auth (authenticate only),
+// and neither yields a nil wrapper — the plain control channel.
+func buildWrapper(cfg *Config) (control.Wrapper, error) {
+	switch {
+	case len(cfg.TLSCrypt) > 0:
+		key, err := tlswrap.ParseStaticKey(cfg.TLSCrypt)
+		if err != nil {
+			return nil, fmt.Errorf("tls-crypt key: %w", err)
+		}
+		// tls-crypt's client direction is fixed: it sends with the second key slot
+		// and receives with the first.
+		return tlswrap.NewCrypt(key, tlswrap.Inverse)
+	case len(cfg.TLSAuth) > 0:
+		key, err := tlswrap.ParseStaticKey(cfg.TLSAuth)
+		if err != nil {
+			return nil, fmt.Errorf("tls-auth key: %w", err)
+		}
+		digest, err := tlswrap.ParseDigest(cfg.Auth)
+		if err != nil {
+			return nil, fmt.Errorf("tls-auth: %w", err)
+		}
+		return tlswrap.NewAuth(key, authDirection(cfg.KeyDirection), digest), nil
+	default:
+		return nil, nil
+	}
+}
+
+// authDirection maps a --key-direction (0, 1, or -1 for unset) to the tlswrap
+// direction the client sends and receives with.
+func authDirection(keyDirection int) tlswrap.Direction {
+	switch keyDirection {
+	case 0:
+		return tlswrap.Normal
+	case 1:
+		return tlswrap.Inverse
+	default:
+		return tlswrap.Bidirectional
+	}
 }
 
 // dataDemux routes any data-channel packet to the client's single tunnel.

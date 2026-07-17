@@ -11,8 +11,8 @@ client can connect to the server, and the bundled client can connect to it (or
 any RFC 7296 responder). The WireGuard side performs the Noise_IKpsk2 handshake
 and transport data path as both initiator and responder, and interoperates with
 a real `wg` peer. The OpenVPN side is a UDP client that speaks the TLS control
-channel and AES-256-GCM data channel, and interoperates with a stock `openvpn`
-server.
+channel — plain, tls-auth, or tls-crypt — and an AES-256-GCM or AES-256-CBC data
+channel, and interoperates with a stock `openvpn` server.
 
 Every layer is covered by tests, including full VPN integration tests:
 `TestFullVPNFlow` drives a client through the handshake and verifies a real IP
@@ -50,12 +50,15 @@ drives the production client against the live server and checks bidirectional ES
   control channel (packet IDs, ACKs, retransmission, in-order delivery), the TLS
   control channel with mutual certificate authentication, the key method 2
   exchange and TLS 1.0 PRF key derivation, cipher negotiation, the
-  `PUSH_REQUEST`/`PUSH_REPLY` config pull, and the AES-256-GCM `P_DATA_V2` data
-  channel with a sliding-window anti-replay filter and keepalive pings. It reads
-  the common `.ovpn` profile (or flags) and is verified against a stock
-  `openvpn` server in Docker. It targets the modern UDP/TLS/AES-256-GCM profile:
-  tls-auth/tls-crypt control wrapping, compression, and non-GCM ciphers are not
-  implemented, and an unsupported profile fails at dial rather than silently.
+  `PUSH_REQUEST`/`PUSH_REPLY` config pull, and the `P_DATA_V2` data channel with
+  a sliding-window anti-replay filter and keepalive pings. The control channel
+  can be plain, `--tls-auth` (an HMAC over every control packet) or `--tls-crypt`
+  (authenticated encryption of every control packet), and the data channel is
+  AES-256-GCM or the older AES-256-CBC (encrypt-then-MAC with an `--auth` HMAC).
+  It reads the common `.ovpn` profile (or flags) and is verified against a stock
+  `openvpn` server in Docker across all four control/data combinations.
+  Compression and the older net30 topology are not implemented, and a profile it
+  cannot speak fails at dial rather than silently.
 
 ## Cryptography
 
@@ -126,8 +129,9 @@ internal/wireguard/transport type-4 transport crypto: counter nonce, padding, re
 internal/openvpn/wire        packet codec: opcode byte, session IDs, control/ACK framing
 internal/openvpn/reliable    control-channel reliability: window, retransmit, reorder, ACKs
 internal/openvpn/control     TLS control channel: a net.Conn over the reliability layer
+internal/openvpn/tlswrap     tls-auth/tls-crypt: static-key HMAC and AES-256-CTR control wrapping
 internal/openvpn/keys        key method 2 exchange + TLS 1.0 PRF key derivation
-internal/openvpn/data        AES-256-GCM P_DATA_V2 seal/open + anti-replay window
+internal/openvpn/data        P_DATA_V2 seal/open (AES-256-GCM and AES-256-CBC) + anti-replay window
 ```
 
 `dataplane` and `internal/cryptoutil` are protocol-agnostic: neither imports anything
@@ -311,22 +315,31 @@ stays up indefinitely; see the note under [What it does](#what-it-does).
 standard `.ovpn` profile, individual flags, or both:
 
 ```sh
-# From an .ovpn profile (remote, ca/cert/key, cipher — inline blocks or paths):
+# From an .ovpn profile (remote, ca/cert/key, cipher, tls-auth/tls-crypt — inline
+# blocks or paths):
 sudo ./veepin connect openvpn -config /etc/openvpn/client.ovpn
 
 # Or from flags with PEM files:
 sudo ./veepin connect openvpn \
   -remote vpn.example.com -port 1194 \
   -ca ca.crt -cert client.crt -key client.key
+
+# A server that wraps the control channel with tls-crypt, or tls-auth:
+sudo ./veepin connect openvpn -config client.ovpn -tls-crypt ta.key
+sudo ./veepin connect openvpn -config client.ovpn -tls-auth ta.key -key-direction 1 -auth SHA256
+
+# An older server whose data channel is AES-256-CBC rather than AES-GCM:
+sudo ./veepin connect openvpn -config client.ovpn -cipher AES-256-CBC -auth SHA256
 ```
 
 The client runs mutual-TLS with the server (verifying the server certificate
-chains to the CA), negotiates AES-256-GCM, pulls its address and routes from the
-server's `PUSH_REPLY`, and applies them the same way the other protocols do
-(`-full-tunnel`/`-no-route` behave identically). It targets the modern
-UDP/TLS/AES-256-GCM profile; see the boundaries under
-[What it does](#what-it-does). Add `-username`/`-password` for servers that
-require `auth-user-pass`.
+chains to the CA), negotiates the data cipher (AES-256-GCM or AES-256-CBC),
+optionally protects the control channel with `--tls-auth` or `--tls-crypt`, pulls
+its address and routes from the server's `PUSH_REPLY`, and applies them the same
+way the other protocols do (`-full-tunnel`/`-no-route` behave identically). All
+four control/data combinations are covered by the Docker interop tests; see the
+boundaries under [What it does](#what-it-does). Add `-username`/`-password` for
+servers that require `auth-user-pass`.
 
 ## Connecting an OS client
 

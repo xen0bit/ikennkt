@@ -41,10 +41,23 @@ const (
 	inboundQueue = 64
 )
 
+// Wrapper adds and removes a control channel's static-key protection —
+// --tls-auth or --tls-crypt. It is optional: a nil Wrapper is the plain profile.
+// Both methods run only on the pump goroutine, so they need no locking of their
+// own beyond the send counter.
+type Wrapper interface {
+	// Wrap protects a marshalled control packet before it is sent.
+	Wrap(pkt []byte) ([]byte, error)
+	// Unwrap checks and strips protection from an inbound datagram, or returns an
+	// error (which drops the datagram).
+	Unwrap(datagram []byte) ([]byte, error)
+}
+
 // Channel is one OpenVPN control channel: a net.Conn for crypto/tls backed by
 // the reliability layer over UDP.
 type Channel struct {
 	send  func([]byte) error
+	wrap  Wrapper
 	keyID uint8
 	local wire.SessionID
 
@@ -72,16 +85,18 @@ type Channel struct {
 // New creates a control channel that transmits through send, tagging packets
 // with keyID. It picks a random local session ID, queues the client hard reset
 // as reliable message 0, and starts the pump. timeout is the reliability
-// retransmit interval (--tls-timeout); zero uses the OpenVPN default. The
-// returned Channel is a net.Conn ready for crypto/tls; the caller must route
+// retransmit interval (--tls-timeout); zero uses the OpenVPN default. wrap, if
+// non-nil, applies --tls-auth/--tls-crypt protection to every control packet.
+// The returned Channel is a net.Conn ready for crypto/tls; the caller must route
 // inbound control datagrams to Deliver.
-func New(send func([]byte) error, keyID uint8, timeout time.Duration) (*Channel, error) {
+func New(send func([]byte) error, keyID uint8, timeout time.Duration, wrap Wrapper) (*Channel, error) {
 	var sid wire.SessionID
 	if _, err := rand.Read(sid[:]); err != nil {
 		return nil, err
 	}
 	c := &Channel{
 		send:      send,
+		wrap:      wrap,
 		keyID:     keyID,
 		local:     sid,
 		sender:    reliable.NewSender(0, timeout),
@@ -235,6 +250,13 @@ func (c *Channel) writePacket(p *wire.ControlPacket) {
 		c.fail(err)
 		return
 	}
+	if c.wrap != nil {
+		out, err = c.wrap.Wrap(out)
+		if err != nil {
+			c.fail(err)
+			return
+		}
+	}
 	if err := c.send(out); err != nil {
 		c.fail(err)
 	}
@@ -245,6 +267,13 @@ func (c *Channel) writePacket(p *wire.ControlPacket) {
 // payloads to Read. The hard-reset's empty payload is dropped rather than fed to
 // TLS.
 func (c *Channel) handleDatagram(dg []byte) {
+	if c.wrap != nil {
+		plain, err := c.wrap.Unwrap(dg)
+		if err != nil {
+			return // authentication failure or replay: drop, retransmission recovers
+		}
+		dg = plain
+	}
 	op, _, ok := wire.Opcode(dg)
 	if !ok || !wire.IsControl(op) {
 		return

@@ -8,10 +8,12 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -75,7 +77,30 @@ func generateOpenVPNPKI(dir string) error {
 	if err := leaf("server", 2, x509.ExtKeyUsageServerAuth, "server.crt", "server.key"); err != nil {
 		return err
 	}
-	return leaf("client", 3, x509.ExtKeyUsageClientAuth, "client.crt", "client.key")
+	if err := leaf("client", 3, x509.ExtKeyUsageClientAuth, "client.crt", "client.key"); err != nil {
+		return err
+	}
+	// A shared static key for the --tls-auth / --tls-crypt control-channel
+	// variants; the plain and CBC profiles ignore it.
+	return writeStaticKey(filepath.Join(dir, "ta.key"))
+}
+
+// writeStaticKey writes a throwaway 2048-bit OpenVPN static key in the
+// "-----BEGIN OpenVPN Static key V1-----" format both ends read.
+func writeStaticKey(path string) error {
+	var key [256]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		return err
+	}
+	var b strings.Builder
+	b.WriteString("#\n# 2048 bit OpenVPN static key\n#\n-----BEGIN OpenVPN Static key V1-----\n")
+	h := hex.EncodeToString(key[:])
+	for i := 0; i < len(h); i += 32 {
+		b.WriteString(h[i : i+32])
+		b.WriteByte('\n')
+	}
+	b.WriteString("-----END OpenVPN Static key V1-----\n")
+	return os.WriteFile(path, []byte(b.String()), 0o600)
 }
 
 func writeCert(path string, der []byte) error {

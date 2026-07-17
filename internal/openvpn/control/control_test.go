@@ -84,11 +84,11 @@ func testCert(t *testing.T) tls.Certificate {
 func runHandshake(t *testing.T, l *link, timeout time.Duration) {
 	t.Helper()
 
-	client, err := New(l.toServer(), 0, timeout)
+	client, err := New(l.toServer(), 0, timeout, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := New(l.toClient(), 0, timeout)
+	server, err := New(l.toClient(), 0, timeout, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,8 +159,8 @@ func TestControlChannelRecoversFromLoss(t *testing.T) {
 
 func TestSessionIDsExchanged(t *testing.T) {
 	l := &link{dropNums: map[int]bool{}}
-	client, _ := New(l.toServer(), 0, 50*time.Millisecond)
-	server, _ := New(l.toClient(), 0, 50*time.Millisecond)
+	client, _ := New(l.toServer(), 0, 50*time.Millisecond, nil)
+	server, _ := New(l.toClient(), 0, 50*time.Millisecond, nil)
 	l.setEnds(client, server)
 	defer client.Close()
 	defer server.Close()

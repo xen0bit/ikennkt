@@ -82,17 +82,27 @@ type DataKeys struct {
 	DecryptIV  [ImplicitIVLen]byte
 }
 
+// CBCKeys is the derived AES-256-CBC material for both directions: a 32-byte
+// AES key and the full 64-byte HMAC slot per direction (the CBC data channel
+// uses the digest-sized prefix of the HMAC slot as its authentication key).
+type CBCKeys struct {
+	EncryptKey  [GCMKeyLen]byte
+	EncryptHMAC [hmacSlot]byte
+	DecryptKey  [GCMKeyLen]byte
+	DecryptHMAC [hmacSlot]byte
+}
+
 // KeySource2 pairs the client's and server's key material for derivation.
 type KeySource2 struct {
 	Client KeySource
 	Server KeySource
 }
 
-// Derive runs OpenVPN's two-stage PRF and slices the resulting key block into
-// data keys. isServer selects the direction: the client seals with the first
-// slot and opens with the second, and the server the reverse, so the two ends'
-// encrypt and decrypt keys line up.
-func (ks *KeySource2) Derive(clientSID, serverSID SessionID, isServer bool) DataKeys {
+// deriveSlots runs OpenVPN's two-stage PRF and returns this side's send and
+// receive key slots (each a 64-byte cipher slot and 64-byte HMAC slot). isServer
+// selects the direction: the client seals with the first slot and opens with the
+// second, and the server the reverse, so the two ends' keys line up.
+func (ks *KeySource2) deriveSlots(clientSID, serverSID SessionID, isServer bool) (sendCipher, sendHMAC, recvCipher, recvHMAC []byte) {
 	master := prf(ks.Client.PreMaster[:], concat(masterSecretLabel, ks.Client.Random1[:], ks.Server.Random1[:]), preMasterLen)
 	seed := concat(keyExpansionLabel, ks.Client.Random2[:], ks.Server.Random2[:], clientSID[:], serverSID[:])
 	block := prf(master, seed, keyBlockLen)
@@ -103,19 +113,39 @@ func (ks *KeySource2) Derive(clientSID, serverSID SessionID, isServer bool) Data
 	slot1Cipher := block[128 : 128+cipherSlot]
 	slot1HMAC := block[128+cipherSlot : keyBlockLen]
 
-	sendCipher, sendHMAC := slot0Cipher, slot0HMAC
-	recvCipher, recvHMAC := slot1Cipher, slot1HMAC
+	sendCipher, sendHMAC = slot0Cipher, slot0HMAC
+	recvCipher, recvHMAC = slot1Cipher, slot1HMAC
 	if isServer {
 		sendCipher, sendHMAC = slot1Cipher, slot1HMAC
 		recvCipher, recvHMAC = slot0Cipher, slot0HMAC
 	}
+	return sendCipher, sendHMAC, recvCipher, recvHMAC
+}
 
+// Derive runs OpenVPN's key derivation and slices out the AES-256-GCM data keys:
+// each direction's 32-byte cipher key and the 8-byte implicit IV that prefixes
+// the packet ID to form the GCM nonce.
+func (ks *KeySource2) Derive(clientSID, serverSID SessionID, isServer bool) DataKeys {
+	sendCipher, sendHMAC, recvCipher, recvHMAC := ks.deriveSlots(clientSID, serverSID, isServer)
 	var dk DataKeys
 	copy(dk.EncryptKey[:], sendCipher[:GCMKeyLen])
 	copy(dk.EncryptIV[:], sendHMAC[:ImplicitIVLen])
 	copy(dk.DecryptKey[:], recvCipher[:GCMKeyLen])
 	copy(dk.DecryptIV[:], recvHMAC[:ImplicitIVLen])
 	return dk
+}
+
+// DeriveCBC runs the same key derivation and slices out the AES-256-CBC data
+// keys: each direction's 32-byte cipher key and full HMAC slot (the CBC cipher
+// uses the digest-sized prefix as its HMAC key).
+func (ks *KeySource2) DeriveCBC(clientSID, serverSID SessionID, isServer bool) CBCKeys {
+	sendCipher, sendHMAC, recvCipher, recvHMAC := ks.deriveSlots(clientSID, serverSID, isServer)
+	var ck CBCKeys
+	copy(ck.EncryptKey[:], sendCipher[:GCMKeyLen])
+	copy(ck.EncryptHMAC[:], sendHMAC)
+	copy(ck.DecryptKey[:], recvCipher[:GCMKeyLen])
+	copy(ck.DecryptHMAC[:], recvHMAC)
+	return ck
 }
 
 // concat builds a PRF seed: the label (no null terminator) followed by the

@@ -2,7 +2,8 @@
 
 Docker-based interoperability tests that run veepin against a real peer and
 prove a working tunnel with a cross-tunnel `ping`: **strongSwan** for IKEv2/ESP
-(both directions), and the reference **wireguard-go** for WireGuard.
+(both directions), the reference **wireguard-go** for WireGuard, and a stock
+**openvpn** server for OpenVPN (across every control/data profile).
 
 ```sh
 make interop
@@ -23,12 +24,18 @@ dependency. Tests skip cleanly if Docker is unavailable.
 | `TestInteropVeepinClientWireguardServer` | `veepin connect wireguard` | wireguard-go | `10.10.10.1` |
 | `TestInteropWireguardClientVeepinServer` | wireguard-go | `veepin serve wireguard` | `10.10.10.1` |
 | `TestInteropWireguardSelf` | `veepin connect wireguard` | `veepin serve wireguard` | `10.10.10.1` |
+| `TestInteropVeepinClientOpenVPNServer` | `veepin connect openvpn` | openvpn (GCM, plain TLS) | `10.8.0.1` |
+| `TestInteropOpenVPNTLSAuth` | `veepin connect openvpn -tls-auth` | openvpn (GCM, `--tls-auth`) | `10.8.0.1` |
+| `TestInteropOpenVPNTLSCrypt` | `veepin connect openvpn -tls-crypt` | openvpn (GCM, `--tls-crypt`) | `10.8.0.1` |
+| `TestInteropOpenVPNCBC` | `veepin connect openvpn -cipher AES-256-CBC` | openvpn (AES-256-CBC) | `10.8.0.1` |
 
 ## Layout
 
 - `Dockerfile` (repo root) — veepin runtime image (static binaries + ip/iptables/ping).
 - `strongswan/` — strongSwan image + swanctl configs for responder and initiator roles.
 - `wireguard/` — reference wireguard-go image + wg-quick responder entrypoint.
+- `openvpn/` — reference openvpn server image + one `server*.conf` per profile
+  (plain GCM, tls-auth, tls-crypt, CBC), selected by `SERVER_CONF`.
 - `veepin/` — entrypoints for `veepin serve` / `veepin connect`.
 - `compose.*.yml` — one per scenario.
 - `interop_test.go` — the `//go:build interop` harness (compose up → retry ping → down).
@@ -47,3 +54,8 @@ dependency. Tests skip cleanly if Docker is unavailable.
   `WG_QUICK_USERSPACE_IMPLEMENTATION`), so it needs only `CAP_NET_ADMIN` and
   `/dev/net/tun` — no host WireGuard kernel module. Its keys are fixed test
   material baked into `compose.wireguard.yml`, a preshared key among them.
+- The OpenVPN scenarios share one throwaway EC PKI and a 2048-bit static key,
+  generated per run into `openvpn/pki/` (gitignored) and mounted into both ends.
+  The four profiles reuse one server image and one client entrypoint; the server
+  picks its config via `SERVER_CONF` and the client its extra flags via
+  `CLIENT_ARGS`.

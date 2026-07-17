@@ -25,9 +25,27 @@ type Config struct {
 	Cert []byte
 	Key  []byte
 
-	// Cipher is the data-channel cipher. Only AES-256-GCM is implemented; a
-	// profile naming anything else is rejected at dial.
+	// Cipher is the data-channel cipher. AES-256-GCM and AES-256-CBC are
+	// implemented; a profile naming anything else is rejected at dial.
 	Cipher string
+
+	// Auth is the --auth digest: the HMAC hash for --tls-auth's control-channel
+	// protection and for the AES-256-CBC data channel. Empty means SHA1
+	// (OpenVPN's default). Only SHA1 and SHA256 are implemented.
+	Auth string
+
+	// TLSAuth and TLSCrypt hold an OpenVPN static key — the --tls-auth or
+	// --tls-crypt file or inline block. At most one applies; both empty is the
+	// plain control channel. TLSCrypt authenticates and encrypts the control
+	// channel; TLSAuth only authenticates it.
+	TLSAuth  []byte
+	TLSCrypt []byte
+
+	// KeyDirection is the --key-direction for --tls-auth: 0 or 1 selects which
+	// half of the static key each side sends with, and -1 (the default) is the
+	// bidirectional mode OpenVPN uses when no direction is given. Ignored for
+	// --tls-crypt, whose direction is fixed.
+	KeyDirection int
 
 	// Username and Password are sent in the key exchange for servers that want
 	// --auth-user-pass; both empty means none.
@@ -44,20 +62,31 @@ type Config struct {
 // Option keys accepted by client.Dial(ctx, "openvpn", opts). OptConfig points at
 // an .ovpn file; the rest override individual fields.
 const (
-	OptConfig   = "config"   // path to an .ovpn file
-	OptRemote   = "remote"   // server host
-	OptPort     = "port"     // server UDP port
-	OptCA       = "ca"       // path to the CA PEM
-	OptCert     = "cert"     // path to the client certificate PEM
-	OptKey      = "key"      // path to the client private key PEM
-	OptCipher   = "cipher"   // data cipher (AES-256-GCM)
-	OptUsername = "username" // auth-user-pass username
-	OptPassword = "password" // auth-user-pass password
-	OptTUNName  = "tun"      // desired TUN interface name
+	OptConfig       = "config"        // path to an .ovpn file
+	OptRemote       = "remote"        // server host
+	OptPort         = "port"          // server UDP port
+	OptCA           = "ca"            // path to the CA PEM
+	OptCert         = "cert"          // path to the client certificate PEM
+	OptKey          = "key"           // path to the client private key PEM
+	OptCipher       = "cipher"        // data cipher (AES-256-GCM or AES-256-CBC)
+	OptAuth         = "auth"          // HMAC digest for tls-auth and the CBC data channel
+	OptTLSAuth      = "tls-auth"      // path to a --tls-auth static key
+	OptTLSCrypt     = "tls-crypt"     // path to a --tls-crypt static key
+	OptKeyDirection = "key-direction" // 0 or 1 for tls-auth
+	OptUsername     = "username"      // auth-user-pass username
+	OptPassword     = "password"      // auth-user-pass password
+	OptTUNName      = "tun"           // desired TUN interface name
 )
 
-// defaultCipher is the only data cipher this client implements.
-const defaultCipher = "AES-256-GCM"
+// Data ciphers this client implements. AES-256-GCM is the default and preferred
+// (AEAD, single-pass); AES-256-CBC is the older encrypt-then-MAC path for
+// servers that do not offer GCM.
+const (
+	cipherGCM = "AES-256-GCM"
+	cipherCBC = "AES-256-CBC"
+
+	defaultCipher = cipherGCM
+)
 
 // defaultPort is OpenVPN's assigned UDP port.
 const defaultPort = 1194
@@ -82,7 +111,7 @@ func ParseConfigFile(path string) (*Config, error) {
 // file paths resolved against baseDir). Unknown directives are ignored, as
 // OpenVPN's own parser tolerates options it does not use in a given mode.
 func parseConfig(r io.Reader, baseDir string) (*Config, error) {
-	cfg := &Config{}
+	cfg := &Config{KeyDirection: -1}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20) // PEM blocks can be large
 	for line := 1; sc.Scan(); line++ {
@@ -159,12 +188,35 @@ func (c *Config) setDirective(text, baseDir string) error {
 		if len(args) >= 1 && c.Cipher == "" {
 			c.Cipher = strings.Split(args[0], ":")[0]
 		}
+	case "auth":
+		if len(args) >= 1 {
+			c.Auth = args[0]
+		}
 	case "ca":
 		return c.setPEMFile("ca", args, baseDir)
 	case "cert":
 		return c.setPEMFile("cert", args, baseDir)
 	case "key":
 		return c.setPEMFile("key", args, baseDir)
+	case "tls-auth":
+		// tls-auth <file> [direction]; a bare directive with no file names an
+		// inline <tls-auth> block handled above.
+		if len(args) >= 1 {
+			if err := c.setPEMFile("tls-auth", args, baseDir); err != nil {
+				return err
+			}
+		}
+		if len(args) >= 2 {
+			return c.setKeyDirection(args[1])
+		}
+	case "tls-crypt":
+		if len(args) >= 1 {
+			return c.setPEMFile("tls-crypt", args, baseDir)
+		}
+	case "key-direction":
+		if len(args) >= 1 {
+			return c.setKeyDirection(args[0])
+		}
 	case "auth-user-pass":
 		// Credentials from a file are out of scope; they come from options.
 	default:
@@ -199,9 +251,23 @@ func (c *Config) setPEM(kind string, pem []byte) error {
 		c.Cert = pem
 	case "key":
 		c.Key = pem
+	case "tls-auth":
+		c.TLSAuth = pem
+	case "tls-crypt":
+		c.TLSCrypt = pem
 	default:
 		return fmt.Errorf("unknown inline block <%s>", kind)
 	}
+	return nil
+}
+
+// setKeyDirection parses a --key-direction / tls-auth direction argument.
+func (c *Config) setKeyDirection(arg string) error {
+	d, err := strconv.Atoi(arg)
+	if err != nil || (d != 0 && d != 1) {
+		return fmt.Errorf("key-direction %q: must be 0 or 1", arg)
+	}
+	c.KeyDirection = d
 	return nil
 }
 
@@ -223,6 +289,7 @@ func (c *Config) applyOverrides(opts map[string]string) error {
 		dest *[]byte
 	}{
 		{OptCA, &c.CA}, {OptCert, &c.Cert}, {OptKey, &c.Key},
+		{OptTLSAuth, &c.TLSAuth}, {OptTLSCrypt, &c.TLSCrypt},
 	} {
 		if path := opts[f.opt]; path != "" {
 			pem, err := os.ReadFile(path)
@@ -231,6 +298,14 @@ func (c *Config) applyOverrides(opts map[string]string) error {
 			}
 			*f.dest = pem
 		}
+	}
+	if v := opts[OptKeyDirection]; v != "" {
+		if err := c.setKeyDirection(v); err != nil {
+			return err
+		}
+	}
+	if v := opts[OptAuth]; v != "" {
+		c.Auth = v
 	}
 	if v := opts[OptCipher]; v != "" {
 		c.Cipher = v
@@ -264,8 +339,11 @@ func (c *Config) validate() error {
 	if c.Cipher == "" {
 		c.Cipher = defaultCipher
 	}
-	if !strings.EqualFold(c.Cipher, defaultCipher) {
-		return fmt.Errorf("unsupported cipher %q (only %s)", c.Cipher, defaultCipher)
+	if !strings.EqualFold(c.Cipher, cipherGCM) && !strings.EqualFold(c.Cipher, cipherCBC) {
+		return fmt.Errorf("unsupported cipher %q (only %s and %s)", c.Cipher, cipherGCM, cipherCBC)
+	}
+	if len(c.TLSAuth) > 0 && len(c.TLSCrypt) > 0 {
+		return fmt.Errorf("%s and %s are mutually exclusive", OptTLSAuth, OptTLSCrypt)
 	}
 	return nil
 }

@@ -1,0 +1,34 @@
+# veepin OpenVPN client -> reference OpenVPN server with --tls-crypt.
+# Every control-channel packet is authenticated with HMAC-SHA256 and encrypted
+# with AES-256-CTR under the shared static key. Data path stays AES-256-GCM.
+# Data-path check: the client pings 10.8.0.1. The PKI and static key in
+# ./openvpn/pki are generated per run and mounted into both ends.
+name: veepin-interop-openvpn-tls-crypt
+
+services:
+  openvpn-server:
+    build:
+      context: openvpn
+    image: interop-openvpn
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      SERVER_CONF: "/server-tls-crypt.conf"
+    volumes:
+      - ./openvpn/pki:/pki:ro
+
+  veepin-ovpn-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [openvpn-server]
+    environment:
+      SERVER: "openvpn-server"
+      CLIENT_ARGS: "-tls-crypt /pki/ta.key"
+    volumes:
+      - ./openvpn/pki:/pki:ro
+      - ./veepin/openvpn-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

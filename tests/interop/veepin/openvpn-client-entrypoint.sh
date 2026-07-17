@@ -4,20 +4,23 @@
 # the TUN up with the pushed address and the connected /24 route, so a ping to
 # the server's tunnel IP crosses the tunnel without hijacking the default route.
 # `veepin connect` blocks once up; if the server is not ready it fails fast, so
-# we retry until it answers.
+# we retry until it answers. CLIENT_ARGS carries any profile-specific flags
+# (-tls-auth, -tls-crypt, -cipher, -auth, -key-direction).
 set -u
 
-echo "veepin-ovpn-client: connecting to ${SERVER}:1194"
+echo "veepin-ovpn-client: connecting to ${SERVER}:1194 ${CLIENT_ARGS:-}"
 
 i=1
 while [ "$i" -le 30 ]; do
+    # shellcheck disable=SC2086 # CLIENT_ARGS is intentionally word-split into flags
     veepin connect openvpn \
         -remote "$SERVER" -port 1194 \
         -ca /pki/ca.crt \
         -cert /pki/client.crt \
         -key /pki/client.key \
         -tun tun0 \
-        -full-tunnel=false
+        -full-tunnel=false \
+        ${CLIENT_ARGS:-}
     echo "veepin-ovpn-client: attempt $i failed; retrying in 2s"
     i=$((i + 1))
     sleep 2

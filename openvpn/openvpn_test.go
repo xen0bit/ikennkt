@@ -3,6 +3,8 @@ package openvpn
 import (
 	"strings"
 	"testing"
+
+	"github.com/xen0bit/veepin/internal/openvpn/keys"
 )
 
 func TestParseConfigInlineAndDirectives(t *testing.T) {
@@ -125,12 +127,28 @@ func TestParsePushNet30(t *testing.T) {
 	}
 }
 
+func TestParsePushRecordsCipher(t *testing.T) {
+	// parsePush records the negotiated cipher; whether it is supported is decided
+	// later, when the data cipher is built.
+	p, err := parsePush("PUSH_REPLY,ifconfig 10.8.0.2 255.255.255.0,cipher AES-256-CBC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.cipher != "AES-256-CBC" {
+		t.Errorf("pushed cipher = %q, want AES-256-CBC", p.cipher)
+	}
+}
+
+func TestBuildDataCipherRejectsUnsupported(t *testing.T) {
+	ks2 := &keys.KeySource2{}
+	if _, err := buildDataCipher("AES-128-CBC", &Config{}, ks2, keys.SessionID{}, keys.SessionID{}, 0); err == nil {
+		t.Error("unsupported cipher accepted")
+	}
+}
+
 func TestParsePushRejects(t *testing.T) {
 	if _, err := parsePush("AUTH_FAILED"); err == nil {
 		t.Error("AUTH_FAILED not surfaced as error")
-	}
-	if _, err := parsePush("PUSH_REPLY,ifconfig 10.8.0.2 255.255.255.0,cipher AES-128-CBC"); err == nil {
-		t.Error("unsupported pushed cipher accepted")
 	}
 	if _, err := parsePush("PUSH_REPLY,peer-id 0"); err == nil {
 		t.Error("missing ifconfig accepted")
@@ -138,11 +156,18 @@ func TestParsePushRejects(t *testing.T) {
 }
 
 func TestPeerInfoAdvertisesGCMAndDataV2(t *testing.T) {
-	pi := peerInfo()
+	pi := peerInfo(&Config{Cipher: cipherGCM})
 	if !strings.Contains(pi, "IV_CIPHERS=AES-256-GCM") {
 		t.Error("peer info does not advertise AES-256-GCM")
 	}
 	if !strings.Contains(pi, "IV_PROTO=2") {
 		t.Error("peer info does not advertise P_DATA_V2 support")
+	}
+}
+
+func TestPeerInfoAdvertisesConfiguredCipher(t *testing.T) {
+	pi := peerInfo(&Config{Cipher: cipherCBC})
+	if !strings.Contains(pi, "IV_CIPHERS=AES-256-CBC") {
+		t.Error("peer info does not advertise the configured CBC cipher")
 	}
 }

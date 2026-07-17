@@ -73,13 +73,44 @@ func TestInteropWireguardSelf(t *testing.T) {
 // (the server's tunnel address). A shared throwaway PKI is generated per run and
 // mounted into both ends, so no keys live in the repo.
 func TestInteropVeepinClientOpenVPNServer(t *testing.T) {
+	runOpenVPNInterop(t, "compose.openvpn.yml")
+}
+
+// TestInteropOpenVPNTLSAuth adds --tls-auth: an HMAC-SHA256 over every
+// control-channel packet under a shared static key (server key-direction 0,
+// client 1). It proves the veepin client's control-channel HMAC wrapping and
+// replay/packet-id handling against a real server, with the AES-GCM data path
+// unchanged.
+func TestInteropOpenVPNTLSAuth(t *testing.T) {
+	runOpenVPNInterop(t, "compose.openvpn-tls-auth.yml")
+}
+
+// TestInteropOpenVPNTLSCrypt adds --tls-crypt: HMAC-SHA256 authentication and
+// AES-256-CTR encryption of every control-channel packet. It proves the veepin
+// client's tls-crypt wrap/unwrap and key derivation against a real server.
+func TestInteropOpenVPNTLSCrypt(t *testing.T) {
+	runOpenVPNInterop(t, "compose.openvpn-tls-crypt.yml")
+}
+
+// TestInteropOpenVPNCBC exercises the older AES-256-CBC data channel
+// (encrypt-then-MAC, HMAC-SHA256) instead of AES-GCM. It proves the veepin
+// client's non-AEAD seal/open, PKCS#7 padding, and CBC key derivation against a
+// real server.
+func TestInteropOpenVPNCBC(t *testing.T) {
+	runOpenVPNInterop(t, "compose.openvpn-cbc.yml")
+}
+
+// runOpenVPNInterop generates the shared throwaway PKI (and static key), then
+// runs an OpenVPN client-vs-server ping across the given compose profile.
+func runOpenVPNInterop(t *testing.T, composeFile string) {
+	t.Helper()
 	requireDocker(t)
 	pkiDir := filepath.Join("openvpn", "pki")
 	if err := generateOpenVPNPKI(pkiDir); err != nil {
 		t.Fatalf("generate PKI: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
-	runInterop(t, "compose.openvpn.yml", "veepin-ovpn-client", "10.8.0.1")
+	runInterop(t, composeFile, "veepin-ovpn-client", "10.8.0.1")
 }
 
 // TestInteropWireguardRekey proves the client rekey loop end to end: the veepin

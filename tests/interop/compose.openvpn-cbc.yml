@@ -1,0 +1,33 @@
+# veepin OpenVPN client -> reference OpenVPN server with the AES-256-CBC data
+# channel (encrypt-then-MAC, HMAC-SHA256) instead of AES-GCM. This exercises the
+# client's non-AEAD data path. Data-path check: the client pings 10.8.0.1. The
+# PKI in ./openvpn/pki is generated per run and mounted into both ends.
+name: veepin-interop-openvpn-cbc
+
+services:
+  openvpn-server:
+    build:
+      context: openvpn
+    image: interop-openvpn
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      SERVER_CONF: "/server-cbc.conf"
+    volumes:
+      - ./openvpn/pki:/pki:ro
+
+  veepin-ovpn-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [openvpn-server]
+    environment:
+      SERVER: "openvpn-server"
+      CLIENT_ARGS: "-cipher AES-256-CBC -auth SHA256"
+    volumes:
+      - ./openvpn/pki:/pki:ro
+      - ./veepin/openvpn-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

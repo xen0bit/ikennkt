@@ -154,15 +154,20 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 		}, nil
 	case "openvpn":
 		var (
-			config = fs.String("config", "", ".ovpn profile (flags below override its values)")
-			remote = fs.String("remote", "", "server host or IP")
-			port   = fs.Int("port", 0, "server UDP port (default 1194)")
-			ca     = fs.String("ca", "", "path to the CA certificate PEM")
-			cert   = fs.String("cert", "", "path to the client certificate PEM")
-			key    = fs.String("key", "", "path to the client private key PEM")
-			user   = fs.String("username", "", "auth-user-pass username (optional)")
-			pass   = fs.String("password", "", "auth-user-pass password (optional)")
-			tun    = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			config   = fs.String("config", "", ".ovpn profile (flags below override its values)")
+			remote   = fs.String("remote", "", "server host or IP")
+			port     = fs.Int("port", 0, "server UDP port (default 1194)")
+			ca       = fs.String("ca", "", "path to the CA certificate PEM")
+			cert     = fs.String("cert", "", "path to the client certificate PEM")
+			key      = fs.String("key", "", "path to the client private key PEM")
+			cipher   = fs.String("cipher", "", "data cipher: AES-256-GCM (default) or AES-256-CBC")
+			auth     = fs.String("auth", "", "HMAC digest for tls-auth and the CBC data channel (default SHA1)")
+			tlsAuth  = fs.String("tls-auth", "", "path to a --tls-auth static key")
+			tlsCrypt = fs.String("tls-crypt", "", "path to a --tls-crypt static key")
+			keyDir   = fs.Int("key-direction", -1, "tls-auth key direction: 0 or 1 (default: bidirectional)")
+			user     = fs.String("username", "", "auth-user-pass username (optional)")
+			pass     = fs.String("password", "", "auth-user-pass password (optional)")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -171,12 +176,19 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 				openvpn.OptCA:       *ca,
 				openvpn.OptCert:     *cert,
 				openvpn.OptKey:      *key,
+				openvpn.OptCipher:   *cipher,
+				openvpn.OptAuth:     *auth,
+				openvpn.OptTLSAuth:  *tlsAuth,
+				openvpn.OptTLSCrypt: *tlsCrypt,
 				openvpn.OptUsername: *user,
 				openvpn.OptPassword: *pass,
 				openvpn.OptTUNName:  *tun,
 			}
 			if *port != 0 {
 				opts[openvpn.OptPort] = fmt.Sprint(*port)
+			}
+			if *keyDir >= 0 {
+				opts[openvpn.OptKeyDirection] = fmt.Sprint(*keyDir)
 			}
 			return opts
 		}, nil

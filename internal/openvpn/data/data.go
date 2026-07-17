@@ -57,7 +57,21 @@ var (
 	// errCounterExhausted reports the 32-bit send counter wrapping, which needs a
 	// rekey this build does not do.
 	errCounterExhausted = errors.New("data: packet counter exhausted, rekey required")
+	// errAuth reports a data packet whose HMAC did not verify (the CBC path; the
+	// GCM path surfaces the AEAD's own error).
+	errAuth = errors.New("data: authentication failed")
 )
+
+// makeHeader builds the constant P_DATA_V2 header: the opcode/key_id byte and
+// the 3-byte peer-id the server assigned.
+func makeHeader(peerID uint32, keyID uint8) [headerLen]byte {
+	var h [headerLen]byte
+	h[0] = PDataV2<<opcodeShift | keyID&0x07
+	h[1] = byte(peerID >> 16)
+	h[2] = byte(peerID >> 8)
+	h[3] = byte(peerID)
+	return h
+}
 
 // Ping is OpenVPN's keepalive payload: an encrypted data packet carrying these
 // exact 16 bytes rather than an IP packet. It is recognised on receipt and
@@ -108,10 +122,7 @@ func New(dk keys.DataKeys, peerID uint32, keyID uint8) (*Cipher, error) {
 		return nil, err
 	}
 	c := &Cipher{send: send, recv: recv, sendIV: dk.EncryptIV, recvIV: dk.DecryptIV}
-	c.header[0] = PDataV2<<opcodeShift | keyID&0x07
-	c.header[1] = byte(peerID >> 16)
-	c.header[2] = byte(peerID >> 8)
-	c.header[3] = byte(peerID)
+	c.header = makeHeader(peerID, keyID)
 	// The recv nonce's IV tail is fixed; only its packet-ID head changes per open.
 	copy(c.recvNonce[packetIDLen:], c.recvIV[:])
 	return c, nil
