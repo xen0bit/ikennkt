@@ -10,6 +10,10 @@ on:
   pull_request:
     branches: [main]
     paths: ["nm/**", "client/**", ".github/workflows/nm.yml"]
+  # Manual trigger, so this can be re-run against the current main even when a
+  # change lands outside the path filter (e.g. a root-module fix the nm module
+  # depends on through its `replace ../`).
+  workflow_dispatch:
 
 concurrency:
   group: nm-${{ github.ref }}
