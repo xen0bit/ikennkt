@@ -498,11 +498,20 @@ func (h *Host) peerAwaiting(localIndex uint32) (*peer, bool) {
 	return nil, false
 }
 
-// install registers a completed tunnel under both lookups.
+// install registers a completed tunnel under both lookups, retiring whatever
+// tunnel to the same peer it replaces.
+//
+// Retiring the old one is not just housekeeping. A tunnel stays usable for as
+// long as it is reachable through byIndex, so leaving the superseded entry there
+// would keep its keys live indefinitely — a peer that rehandshakes would go on
+// having its previous session accepted, and the map would grow by one entry
+// every time. Handshakes recur whenever a tunnel is lost, so this accumulates on
+// exactly the hosts that are having trouble.
 func (h *Host) install(t *tunnel, from netip.AddrPort) {
 	p := h.peerFor(t.PeerAddr())
 
 	p.mu.Lock()
+	old := p.tun
 	p.tun = t
 	// The address the handshake actually arrived from is authoritative: it is
 	// where the peer can be reached right now, whatever configuration said.
@@ -510,6 +519,9 @@ func (h *Host) install(t *tunnel, from netip.AddrPort) {
 	p.mu.Unlock()
 
 	h.mu.Lock()
+	if old != nil && old != t {
+		delete(h.byIndex, old.localIndex)
+	}
 	h.byIndex[t.localIndex] = t
 	h.mu.Unlock()
 }

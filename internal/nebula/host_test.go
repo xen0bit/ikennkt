@@ -391,6 +391,64 @@ func TestSpoofedSourceAddressDropped(t *testing.T) {
 	}
 }
 
+// A rehandshake with the same peer must retire the tunnel it replaces. A tunnel
+// is usable for as long as it is reachable through the index map, so leaving the
+// old entry there would keep its keys live indefinitely and grow the map by one
+// entry per handshake -- on exactly the hosts that are already having trouble.
+func TestRehandshakeRetiresTheOldTunnel(t *testing.T) {
+	f := newFabric()
+	addrA, addrB := mustAddrPort("192.0.2.1:4242"), mustAddrPort("192.0.2.2:4242")
+	overlayA, overlayB := netip.MustParseAddr("10.42.0.1"), netip.MustParseAddr("10.42.0.2")
+
+	hostA := startHost(t, f, "host-a.crt", "host-a.key", addrA, func(c *Config) {
+		c.StaticHosts[overlayB] = []netip.AddrPort{addrB}
+	})
+	hostB := startHost(t, f, "host-b.crt", "host-b.key", addrB, func(c *Config) {
+		c.StaticHosts[overlayA] = []netip.AddrPort{addrA}
+	})
+
+	sendUntilDelivered(t, hostA, hostB, overlayA, overlayB, "first-session")
+
+	pb, ok := hostB.lookupPeer(overlayA)
+	if !ok {
+		t.Fatal("host-b has no peer record for host-a")
+	}
+	pb.mu.Lock()
+	firstTunnel := pb.tun
+	pb.mu.Unlock()
+	if firstTunnel == nil {
+		t.Fatal("host-b has no tunnel after the first session")
+	}
+
+	// Force host-a to build a fresh tunnel to the same peer.
+	pa, _ := hostA.lookupPeer(overlayB)
+	pa.mu.Lock()
+	pa.tun = nil
+	pa.pending = nil
+	pa.lastAttempt = time.Time{}
+	pa.mu.Unlock()
+
+	sendUntilDelivered(t, hostA, hostB, overlayA, overlayB, "second-session")
+
+	waitFor(t, func() bool {
+		pb.mu.Lock()
+		defer pb.mu.Unlock()
+		return pb.tun != nil && pb.tun != firstTunnel
+	}, "host-b to accept a replacement tunnel")
+
+	hostB.mu.RLock()
+	_, stale := hostB.byIndex[firstTunnel.localIndex]
+	count := len(hostB.byIndex)
+	hostB.mu.RUnlock()
+
+	if stale {
+		t.Error("the superseded tunnel is still reachable by index; its keys remain live")
+	}
+	if count != 1 {
+		t.Errorf("host-b holds %d tunnels after a rehandshake, want 1", count)
+	}
+}
+
 func TestSendPacketWithoutRouteFails(t *testing.T) {
 	f := newFabric()
 	hostA := startHost(t, f, "host-a.crt", "host-a.key", mustAddrPort("192.0.2.1:4242"), nil)
