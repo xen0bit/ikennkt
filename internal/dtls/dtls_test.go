@@ -17,7 +17,7 @@ type pktConn struct {
 	peer *net.UDPAddr
 }
 
-func (p *pktConn) Write(b []byte) (int, error) { return p.UDPConn.WriteToUDP(b, p.peer) }
+func (p *pktConn) Write(b []byte) (int, error) { return p.WriteToUDP(b, p.peer) }
 func (p *pktConn) RemoteAddr() net.Addr        { return p.peer }
 
 // udpPair returns two UDP endpoints on loopback addressed to each other.
