@@ -43,6 +43,9 @@ const (
 // ErrNoRoute reports a packet for an overlay address with no known peer.
 var ErrNoRoute = errors.New("nebula: no peer for that overlay address")
 
+// errNotIPv4 reports a packet the IPv4-only overlay cannot carry.
+var errNotIPv4 = errors.New("nebula: outbound packet is not IPv4")
+
 // packetConn is the UDP socket the host owns, narrowed so tests can substitute
 // an in-memory pair.
 type packetConn interface {
@@ -176,6 +179,15 @@ func NewHost(cfg *Config, conn packetConn, tun io.ReadWriteCloser) (*Host, error
 // Addr returns this host's overlay address.
 func (h *Host) Addr() netip.Addr { return h.addr }
 
+// OverlayBits is the prefix length of the overlay network this host is on, as
+// its certificate defines it.
+func (h *Host) OverlayBits() int {
+	if len(h.cfg.Identity.Cert.Networks) == 0 {
+		return h.addr.BitLen()
+	}
+	return h.cfg.Identity.Cert.Networks[0].Bits()
+}
+
 // Run pumps both directions until the host is closed.
 func (h *Host) Run() {
 	h.wg.Add(3)
@@ -271,7 +283,15 @@ func (h *Host) readTUN() {
 			// A packet with nowhere to go is a dropped packet, not a fatal
 			// condition: in a mesh it is entirely normal to have traffic for a
 			// host whose tunnel has not been built yet.
-			h.log.Printf("nebula: dropping outbound packet: %v", err)
+			//
+			// Non-IPv4 is not worth reporting at all. A version 1 overlay is
+			// IPv4 only, and Linux puts IPv6 router solicitations and multicast
+			// on any interface that comes up, so logging those would emit a
+			// steady stream of drops that never means anything -- and would
+			// bury the drops that do.
+			if !errors.Is(err, errNotIPv4) {
+				h.log.Printf("nebula: dropping outbound packet: %v", err)
+			}
 		}
 	}
 }
@@ -280,7 +300,7 @@ func (h *Host) readTUN() {
 func (h *Host) sendPacket(pkt []byte) error {
 	dst, ok := destinationAddr(pkt)
 	if !ok {
-		return errors.New("nebula: outbound packet is not IPv4")
+		return errNotIPv4
 	}
 
 	p, ok := h.lookupPeer(dst)
