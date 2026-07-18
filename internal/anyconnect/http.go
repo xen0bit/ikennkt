@@ -137,27 +137,40 @@ func parseDTLSParams(h http.Header, tlsMTU int) (DTLSParams, error) {
 // carrier inside a 1500-octet path.
 const defaultMTU = 1400
 
-// buildConnectRequest constructs the CONNECT that turns the authenticated HTTPS
+// buildConnectRequest renders the CONNECT that turns the authenticated HTTPS
 // connection into a tunnel.
-func buildConnectRequest(host, cookie, hostname string, baseMTU int) (*http.Request, error) {
-	req, err := http.NewRequest(http.MethodConnect, "https://"+host+tunnelPath, nil)
-	if err != nil {
-		return nil, fmt.Errorf("anyconnect: build CONNECT: %w", err)
-	}
-	req.Host = host
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Cookie", sessionCookie+"="+cookie)
-	req.Header.Set(hdrVersion, "1")
-	req.Header.Set(hdrHostname, hostname)
-	req.Header.Set(hdrBaseMTU, strconv.Itoa(baseMTU))
-	req.Header.Set(hdrMTU, strconv.Itoa(baseMTU))
+//
+// It is written by hand for the same reason responses are: net/http canonicalizes
+// header names, turning X-CSTP-MTU into X-Cstp-Mtu and X-DTLS-CipherSuite into
+// X-Dtls-Ciphersuite. AnyConnect servers match these case-sensitively and
+// silently ignore what they do not recognise, so a canonicalized DTLS offer reads
+// to them as no offer at all — the tunnel still works, but only ever over TLS,
+// which is precisely how this was missed until the UDP channel was implemented.
+func buildConnectRequest(host, cookie, hostname string, baseMTU int) []byte {
+	var h headerList
+	h.set("Host", host)
+	h.set("User-Agent", userAgent)
+	h.set("Cookie", sessionCookie+"="+cookie)
+	h.set(hdrVersion, "1")
+	h.set(hdrHostname, hostname)
+	h.setInt(hdrBaseMTU, baseMTU)
+	h.setInt(hdrMTU, baseMTU)
 	// IPv4 only: the data path forwards IPv4, so asking for an IPv6 address would
 	// mean accepting one veepin cannot route.
-	req.Header.Set(hdrAddressType, "IPv4")
+	h.set(hdrAddressType, "IPv4")
 	// Offer the UDP data channel. A server that does not support it simply omits
 	// the DTLS headers from its reply and the tunnel stays on TLS.
-	req.Header.Set(hdrDTLSCipherSuite, pskNegotiate)
-	return req, nil
+	h.set(hdrDTLSCipherSuite, pskNegotiate)
+
+	var buf []byte
+	buf = append(buf, "CONNECT "+tunnelPath+" HTTP/1.1\r\n"...)
+	for _, kv := range h {
+		buf = append(buf, kv[0]...)
+		buf = append(buf, ": "...)
+		buf = append(buf, kv[1]...)
+		buf = append(buf, "\r\n"...)
+	}
+	return append(buf, "\r\n"...)
 }
 
 // userAgent identifies veepin as an AnyConnect client. Servers parse this and

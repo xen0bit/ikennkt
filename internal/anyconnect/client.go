@@ -247,14 +247,12 @@ func (c *Client) connect(cookie string) (TunnelConfig, error) {
 	if hostname == "" {
 		hostname = "veepin"
 	}
-	req, err := buildConnectRequest(c.cfg.Host, cookie, hostname, baseMTU)
-	if err != nil {
-		return TunnelConfig{}, err
-	}
-	if err := req.Write(c.conn); err != nil {
+	if _, err := c.conn.Write(buildConnectRequest(c.cfg.Host, cookie, hostname, baseMTU)); err != nil {
 		return TunnelConfig{}, fmt.Errorf("anyconnect: send CONNECT: %w", err)
 	}
-	resp, err := http.ReadResponse(c.br, req)
+	// The request is handed to ReadResponse only so it knows this was a CONNECT,
+	// which is what stops net/http treating the tunnel as a response body.
+	resp, err := http.ReadResponse(c.br, &http.Request{Method: http.MethodConnect})
 	if err != nil {
 		return TunnelConfig{}, fmt.Errorf("anyconnect: read CONNECT reply: %w", err)
 	}

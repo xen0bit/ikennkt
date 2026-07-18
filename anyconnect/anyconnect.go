@@ -22,6 +22,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -80,6 +81,11 @@ func (c *Config) validate() error {
 
 func parseOptions(opts map[string]string) (client.Dialer, error) {
 	cfg := &Config{
+		// Whether the data channel ended up on UDP or fell back to TCP is
+		// operationally significant — it is the difference between a tunnel that
+		// performs and one that does not — so the engine's log is surfaced rather
+		// than discarded. The other client protocols predate this and stay quiet.
+		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
 		Server:   opts[OptServer],
 		Username: opts[OptUser],
 		Password: opts[OptPassword],
