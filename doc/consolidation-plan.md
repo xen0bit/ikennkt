@@ -18,10 +18,18 @@ included so the findings can be re-checked rather than taken on trust.
 | 4 | MTU constants scattered, none derived | Medium | Low | Do |
 | 5 | `doc.go` describes two of nine protocols | Low | None | Do (trivial) |
 | 6 | Seven replay-window implementations | Low | **High** | **Mostly don't** |
-| 7 | Duplicated logger/conn plumbing | Very low | Low | Only if it falls out of 2–4 |
+| 7 | Duplicated logger/conn plumbing | Very low → **High** | Low | Done — and it was not cosmetic |
 
 The ordering is deliberate: items 1–3 are defects, 4–5 are hygiene, and 6–7 are
 the ones that *look* most like obvious wins and are the least worth doing.
+
+**Item 7 disproved that last claim.** It was ranked lowest in the table — a
+duplicated logger and an adapter that "would be subsumed". Pulling on the
+adapter showed *why* it existed: nebula's socket interface used method names
+`dataplane.PacketConn` does not have, so nebula could not adopt the wrapper and
+was the one UDP server in the tree still replying from a kernel-chosen source
+address. The cosmetic framing was wrong. A private adapter is worth asking about
+precisely because it is where a shared fix silently fails to reach.
 
 Part 2 covers what a separate pass found when asking a different question — not
 "what is untidy" but **"what is structurally absent across the whole tree"**. Two
@@ -33,7 +41,7 @@ of those findings outrank everything in the table above.
 | 9 | Every server accepts unbounded half-open state | **Very high** | Medium | **Do** |
 | 10 | ~~Nebula has no rekeying~~ — claim was wrong; real gap is idle expiry | Medium | Low | Done, premise corrected |
 | 11 | Credential comparison timing is inconsistent | Medium | Very low | Do |
-| 12 | Keys are never zeroed | Low | — | Document, don't chase |
+| 12 | Keys are never zeroed | Low | — | Done — documented in the README |
 | 13 | Single-threaded data path | Low | — | Not a flaw |
 
 ## 1. The `client.Result` contract is underspecified
