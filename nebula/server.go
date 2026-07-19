@@ -1,0 +1,166 @@
+package nebula
+
+// The server role.
+//
+// Nebula has no server in the sense the other protocols here use the word. What
+// `veepin serve nebula` runs is a lighthouse: an ordinary mesh member, with an
+// ordinary certificate, that additionally answers questions about where other
+// members are and helps two NATed hosts punch towards each other.
+//
+// So this is the same engine Dial runs, with AmLighthouse set. It is a separate
+// entry point because the lifecycle differs — a lighthouse is expected to stay
+// up at a stable address, and it is the one host in a mesh that usually needs to
+// be directly reachable.
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"strconv"
+	"sync"
+
+	"github.com/xen0bit/veepin/client"
+)
+
+func init() { client.RegisterServer("nebula", parseServerOptions) }
+
+// ServerConfig configures a lighthouse.
+type ServerConfig struct {
+	Config
+}
+
+// Server is a running lighthouse.
+type Server struct {
+	cfg  ServerConfig
+	sess *Session
+
+	mu      sync.Mutex
+	started bool
+	closed  bool
+	done    chan struct{}
+}
+
+// NewServer prepares a lighthouse. Nothing binds until ListenAndServe.
+func NewServer(cfg ServerConfig) (*Server, error) {
+	if cfg.CAPath == "" || cfg.CertPath == "" || cfg.KeyPath == "" {
+		return nil, errors.New("nebula: ca, cert and key are all required")
+	}
+	// A lighthouse that does not answer queries is just a host, and would
+	// silently fail to do the one job it was started for.
+	cfg.AmLighthouse = true
+	return &Server{cfg: cfg, done: make(chan struct{})}, nil
+}
+
+// ListenAndServe runs the lighthouse until it is closed.
+func (s *Server) ListenAndServe() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return net.ErrClosed
+	}
+	if s.started {
+		s.mu.Unlock()
+		return errors.New("nebula: server already started")
+	}
+	s.started = true
+	s.mu.Unlock()
+
+	sess, _, err := Dial(context.Background(), s.cfg.Config)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	if s.closed {
+		// Close raced ahead of the bind; do not leave the host running.
+		s.mu.Unlock()
+		return sess.Close()
+	}
+	s.sess = sess
+	s.mu.Unlock()
+
+	<-s.done
+	return sess.Close()
+}
+
+// Close stops the lighthouse.
+func (s *Server) Close() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	close(s.done)
+	s.mu.Unlock()
+	return nil
+}
+
+// TUNName is the interface the lighthouse is bound to.
+func (s *Server) TUNName() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sess == nil {
+		return ""
+	}
+	return s.sess.tun.Name()
+}
+
+// Gateway is the lighthouse's own overlay address.
+//
+// A mesh has no gateway: peers reach each other directly, and nothing routes
+// through the lighthouse. This reports its own address so callers that anchor
+// an interface on it get something coherent.
+func (s *Server) Gateway() net.IP {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sess == nil {
+		return nil
+	}
+	return net.IP(s.sess.Addr().AsSlice())
+}
+
+// Network is the overlay subnet, taken from the lighthouse's certificate rather
+// than from configuration -- in nebula the CA decides it.
+func (s *Server) Network() *net.IPNet {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sess == nil {
+		return nil
+	}
+	addr := s.sess.Addr()
+	return &net.IPNet{
+		IP:   net.IP(addr.AsSlice()).Mask(net.CIDRMask(s.prefixBits(), 32)),
+		Mask: net.CIDRMask(s.prefixBits(), 32),
+	}
+}
+
+// prefixBits is the overlay prefix length from the certificate.
+func (s *Server) prefixBits() int {
+	if s.sess == nil {
+		return 32
+	}
+	return s.sess.host.OverlayBits()
+}
+
+// parseServerOptions turns registry options into a Server.
+func parseServerOptions(opts map[string]string) (client.Server, error) {
+	d, err := parseOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+	cfg := d.(dialer).cfg
+
+	if v := opts[OptListen]; v == "" {
+		// A lighthouse has to be findable, so default it to the well-known port
+		// explicitly rather than leaving it to chance.
+		cfg.Listen = ":" + strconv.Itoa(defaultPort)
+	}
+
+	srv, err := NewServer(ServerConfig{Config: cfg})
+	if err != nil {
+		return nil, fmt.Errorf("nebula: %w", err)
+	}
+	return srv, nil
+}

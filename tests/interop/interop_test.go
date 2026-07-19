@@ -352,6 +352,36 @@ func TestInteropL2TPSelf(t *testing.T) {
 	runInterop(t, "compose.l2tp-self.yml", "veepin-l2tp-client", "10.20.0.1")
 }
 
+// TestInteropVeepinNebulaHostReferenceLighthouse proves the veepin nebula host
+// against the real slackhq/nebula daemon: the Noise_IX handshake, the 16-octet
+// header whose contents are authenticated as AEAD additional data, and the
+// certificate format -- veepin parses and verifies certificates issued per run
+// by the reference nebula-cert, which is what proves its protobuf encoder
+// agrees with protobuf-go byte for byte. The veepin host finds the reference
+// host through nebula's own lighthouse protocol rather than a static entry,
+// then pings 10.42.0.1.
+func TestInteropVeepinNebulaHostReferenceLighthouse(t *testing.T) {
+	runInterop(t, "compose.nebula.yml", "veepin-nebula", "10.42.0.1")
+}
+
+// TestInteropNebulaHostVeepinLighthouse is the mirror, and the direction that
+// proves veepin's responder and its lighthouse: the reference daemon reports
+// its location to a veepin lighthouse, queries it, and handshakes against
+// veepin's responder side. The reference host pings 10.42.0.1, the veepin
+// lighthouse's overlay address.
+func TestInteropNebulaHostVeepinLighthouse(t *testing.T) {
+	runInterop(t, "compose.nebula-server.yml", "nebula-host", "10.42.0.1")
+}
+
+// TestInteropNebulaSelf is the veepin<->veepin mesh check, and the one cell that
+// exercises discovery end to end: two veepin members are given no static entry
+// for each other, so the ping to 10.42.0.3 can only cross if one queries the
+// lighthouse, the lighthouse answers and nudges the other to punch, and the two
+// then handshake directly. It isolates a veepin break from an interop break.
+func TestInteropNebulaSelf(t *testing.T) {
+	runInterop(t, "compose.nebula-self.yml", "veepin-host-b", "10.42.0.3")
+}
+
 // waitPing retries a short ping from pingSvc to target until one reports no loss
 // or pingDeadline elapses, reporting whether the tunnel came up.
 func waitPing(t *testing.T, composeFile, pingSvc, target string) bool {

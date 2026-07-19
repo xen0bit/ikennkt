@@ -1,0 +1,65 @@
+# Reference nebula host -> veepin lighthouse.
+#
+# The mirror of compose.nebula.yml, and the cell that exercises veepin's
+# responder side: it answers the reference implementation's handshake, and it
+# runs the lighthouse the reference host reports to and queries. Data-path
+# check: the reference host pings 10.42.0.1, the veepin lighthouse's overlay
+# address.
+#
+# This is the direction that proves veepin's lighthouse protocol is right rather
+# than merely self-consistent -- the reference daemon has to accept the query
+# replies and host updates veepin produces.
+name: veepin-interop-nebula-server
+
+services:
+  nebula-pki:
+    build:
+      context: nebula
+    image: interop-nebula
+    environment:
+      HOSTS: "veepin=10.42.0.1/24 ref=10.42.0.2/24"
+    volumes:
+      - pki:/pki
+      - ./nebula/pki-entrypoint.sh:/pki-entrypoint.sh:ro
+    command: ["/bin/sh", "/pki-entrypoint.sh"]
+
+  veepin-nebula:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on:
+      nebula-pki:
+        condition: service_completed_successfully
+    environment:
+      NAME: "veepin"
+      AM_LIGHTHOUSE: "true"
+    volumes:
+      - pki:/pki
+      - ./veepin/nebula-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  nebula-host:
+    build:
+      context: nebula
+    image: interop-nebula
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on:
+      nebula-pki:
+        condition: service_completed_successfully
+      veepin-nebula:
+        condition: service_started
+    environment:
+      NAME: "ref"
+      STATIC_HOSTS: "10.42.0.1=veepin-nebula:4242"
+      LIGHTHOUSE_HOSTS: "10.42.0.1"
+    volumes:
+      - pki:/pki
+      - ./nebula/host-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+volumes:
+  pki:

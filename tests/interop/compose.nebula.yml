@@ -1,0 +1,67 @@
+# veepin nebula host -> reference nebula lighthouse.
+#
+# The veepin host runs the Noise_IX handshake, the 16-octet header and the
+# AEAD data path against the real slackhq/nebula daemon, and finds it through
+# nebula's own lighthouse protocol. Data-path check: veepin pings 10.42.0.1,
+# the reference host's overlay address.
+#
+# Both certificates are issued per run by the reference nebula-cert, so veepin
+# is parsing and verifying certificates it did not produce -- which is the only
+# way to prove its protobuf encoder agrees with protobuf-go byte for byte.
+name: veepin-interop-nebula
+
+services:
+  nebula-pki:
+    build:
+      context: nebula
+    image: interop-nebula
+    environment:
+      # name=overlay-address pairs; the CA issues one certificate per entry.
+      HOSTS: "ref=10.42.0.1/24 veepin=10.42.0.2/24"
+    volumes:
+      - pki:/pki
+      - ./nebula/pki-entrypoint.sh:/pki-entrypoint.sh:ro
+    command: ["/bin/sh", "/pki-entrypoint.sh"]
+
+  nebula-host:
+    build:
+      context: nebula
+    image: interop-nebula
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on:
+      nebula-pki:
+        condition: service_completed_successfully
+    environment:
+      NAME: "ref"
+      AM_LIGHTHOUSE: "true"
+    volumes:
+      - pki:/pki
+      - ./nebula/host-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-nebula:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on:
+      nebula-pki:
+        condition: service_completed_successfully
+      nebula-host:
+        condition: service_started
+    environment:
+      NAME: "veepin"
+      # Only the lighthouse needs a static entry; the reference host is found
+      # through it rather than configured directly.
+      STATIC_HOSTS: "10.42.0.1=nebula-host:4242"
+      LIGHTHOUSES: "10.42.0.1"
+    volumes:
+      - pki:/pki
+      - ./veepin/nebula-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+volumes:
+  pki:

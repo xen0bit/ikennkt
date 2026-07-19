@@ -15,6 +15,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/ikev2"
 	"github.com/xen0bit/veepin/l2tp"
+	"github.com/xen0bit/veepin/nebula"
 	"github.com/xen0bit/veepin/openvpn"
 	"github.com/xen0bit/veepin/ssh"
 	"github.com/xen0bit/veepin/sstp"
@@ -226,6 +227,36 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			}
 			if *port != 0 {
 				opts[l2tp.OptServerPort] = fmt.Sprint(*port)
+			}
+			return opts
+		}, nil
+	case "nebula":
+		// `serve nebula` runs a lighthouse: an ordinary mesh member that also
+		// answers questions about where other members are. There is no address
+		// pool or user list, because a nebula host's address and identity come
+		// from the certificate its CA signed.
+		var (
+			ca          = fs.String("ca", "", "path to the CA certificate bundle (required)")
+			cert        = fs.String("cert", "", "path to this lighthouse's certificate (required)")
+			key         = fs.String("key", "", "path to this lighthouse's X25519 private key (required)")
+			listen      = fs.String("listen", "", "local UDP address to bind (default :4242)")
+			staticHosts = fs.String("static-hosts", "", "peer locations: 10.42.0.1=192.0.2.10:4242[,...];...")
+			cipher      = fs.String("cipher", "", "aes (default) or chachapoly; must match the mesh")
+			mtu         = fs.Int("mtu", 0, "inner MTU (default 1300)")
+			tun         = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				nebula.OptCA:          *ca,
+				nebula.OptCert:        *cert,
+				nebula.OptKey:         *key,
+				nebula.OptListen:      *listen,
+				nebula.OptStaticHosts: *staticHosts,
+				nebula.OptCipher:      *cipher,
+				nebula.OptTUN:         *tun,
+			}
+			if *mtu != 0 {
+				opts[nebula.OptMTU] = fmt.Sprint(*mtu)
 			}
 			return opts
 		}, nil

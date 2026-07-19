@@ -2,9 +2,9 @@
 
 A **working userspace VPN in Go** — both a server (responder) and a client
 (initiator) — written from scratch, with `golang.org/x/crypto` the only
-dependency. It speaks seven protocols, **client and server for every one**:
-**IKEv2/ESP**, **WireGuard**, **OpenVPN**, **SSTP**, **SSH**, **L2TP/IPsec**, and
-**AnyConnect**.
+dependency. It speaks eight protocols, **client and server for every one**:
+**IKEv2/ESP**, **WireGuard**, **OpenVPN**, **SSTP**, **SSH**, **L2TP/IPsec**,
+**AnyConnect**, and **Nebula**.
 The SSTP side runs Microsoft's Secure Socket Tunneling Protocol over TLS — the
 `SSTP_DUPLEX_POST` HTTP handshake, the CALL_CONNECT crypto binding, MS-CHAPv2
 authentication and a PPP/IPCP data path — as both client and server, verified
@@ -114,6 +114,25 @@ drives the production client against the live server and checks bidirectional ES
   (`(DTLS1.2)-(PSK)-(AES-256-GCM)`). Every failure path downgrades rather than
   fails — no offer, a slow handshake, a channel that later drops — so a tunnel
   always works, on TLS if not on UDP.
+- **Nebula host and lighthouse**: Slack's mesh overlay, and the first protocol
+  here that is not hub-and-spoke. Every host is a peer: it listens on one UDP
+  port and opens a tunnel directly to any host it has traffic for, with the same
+  code on both ends. Identity is a small PKI rather than a shared secret — a CA
+  issues one certificate per host, and that certificate carries the host's
+  overlay address and group memberships *inside the signed payload*, so a peer
+  never asserts its own address. Verifying the certificate is the authorization
+  step. Tunnels are keyed by a **Noise IX** handshake (two messages, one round
+  trip, both sides authenticated) over a fixed 16-octet header that is itself
+  authenticated as AEAD additional data. **Lighthouses** are how hosts find each
+  other without a concentrator: members report where they are and query for
+  others, and a lighthouse answering a query also nudges the target to punch
+  outward so two NATed hosts can meet. Because nothing keys off the source
+  address, a peer that roams or is re-NATed is followed without renegotiating.
+  Both roles are verified in Docker against the reference `slackhq/nebula`
+  daemon in both directions, with the PKI issued per run by the reference
+  `nebula-cert` — so veepin parses and verifies certificates it did not produce.
+  Version 1 certificates (protobuf, IPv4) and Curve25519; the ACL engine,
+  relays and version 2 certificates are not implemented.
 
 ## Cryptography
 
@@ -171,6 +190,7 @@ sstp                     public SSTP entry point: Dial + NewServer, Config, cryp
 ssh                      public SSH entry point: Dial + NewServer, Config (x/crypto/ssh)
 l2tp                     public L2TP/IPsec entry point: Dial + NewServer, Config
 anyconnect               public AnyConnect entry point: Dial + NewServer, Config
+nebula                   public Nebula entry point: Dial + NewServer (lighthouse), Config
 
 dataplane                TUN device, address pool, packet pump (demux + routing), client routing
 internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers, ChaCha20-Poly1305, BLAKE2s
@@ -200,6 +220,9 @@ internal/sshtun              OpenSSH tun@openssh.com framing: channel-open data 
 
 internal/anyconnect          CSTP framing, the config-auth XML exchange, the DTLS channel, and the client/server engines
 internal/dtls                DTLS 1.2 PSK: record layer, handshake flights, fragmentation, anti-replay
+
+internal/nebula              minimal protobuf codec, v1 certificates + CA pool, Noise IX, 16-octet header,
+                             AEAD data path with anti-replay, the mesh host engine and the lighthouse protocol
 
 internal/ikev1               ISAKMP/IKEv1: payload codec, Main + Quick mode, SKEYID/KEYMAT, CBC IV chaining
 internal/l2tp                RFC 2661 header/AVP codec, reliable control channel, PPP data channel,
@@ -575,6 +598,49 @@ session cookie, and assigned an address from the pool. veepin implements the CST
 (TLS) data channel; a client that would prefer DTLS falls back to it
 automatically, and `openconnect --no-dtls` asks for it explicitly.
 
+### Joining a Nebula mesh
+
+Nebula has no client and no server, so both roles run the same command. A host
+needs three files — the CA bundle it trusts, its own certificate, and the key
+that certificate is bound to — all issued by `nebula-cert`:
+
+```sh
+nebula-cert ca   -name "example-mesh"
+nebula-cert sign -name laptop -ip 10.42.0.7/24
+```
+
+The host's overlay address comes from its certificate, not from a flag or a
+server, so there is nothing to assign:
+
+```sh
+sudo ./veepin connect nebula \
+  -ca /etc/nebula/ca.crt -cert /etc/nebula/laptop.crt -key /etc/nebula/laptop.key \
+  -static-hosts "10.42.0.1=lighthouse.example.com:4242" \
+  -lighthouses 10.42.0.1 \
+  -full-tunnel=false
+```
+
+Only the lighthouse needs a static entry: every other host is discovered through
+it. `-full-tunnel=false` is the usual choice, since a mesh carries the overlay
+prefix rather than a default route.
+
+### Running a Nebula lighthouse
+
+`veepin serve nebula` runs the directory the mesh finds itself through. It is an
+ordinary member with an ordinary certificate — it just also answers questions
+about where other members are, and helps two NATed hosts punch towards each
+other. It needs a stable, directly reachable address:
+
+```sh
+sudo ./veepin serve nebula \
+  -ca /etc/nebula/ca.crt -cert /etc/nebula/lighthouse.crt -key /etc/nebula/lighthouse.key \
+  -listen 0.0.0.0:4242
+```
+
+There is no address pool and no user list: a host's address and identity are
+whatever its certificate says, so the CA is the only thing that grants access.
+Revocation is by certificate expiry — veepin does not implement blocklists.
+
 ## Connecting an OS client
 
 The server authenticates with a machine PSK plus an identity, and assigns the
@@ -770,6 +836,7 @@ both roles, so all three cells below are exercised.
 | SSH       | ✓ `sshd` (PermitTunnel)     | ✓ `ssh -w`                  | ✓                      |
 | L2TP/IPsec| ✓ strongSwan + xl2tpd       | ✓ strongSwan + xl2tpd       | ✓                      |
 | AnyConnect| ✓ ocserv                    | ✓ openconnect               | ✓                      |
+| Nebula    | ✓ `nebula` (lighthouse)     | ✓ `nebula` (host)           | ✓ (via lighthouse)     |
 
 Both roles share one API: a client registers with `client.Register` and is dialed
 by `client.Dial`; a server registers with `client.RegisterServer` and is built by
