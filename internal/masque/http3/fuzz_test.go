@@ -18,11 +18,19 @@ func FuzzConsumeVarint(f *testing.F) {
 		if err != nil {
 			return
 		}
-		// A decoded varint must re-encode to a prefix of the input, and the
-		// remainder must be exactly what is left.
+		// RFC 9000 §16: a decoder must accept a value in a longer encoding than
+		// necessary, so the number of octets consumed may exceed the canonical
+		// length. The canonical form must therefore be no *longer* than what was
+		// on the wire, and must itself round-trip to the same value -- but it is
+		// not required to equal the input bytes.
+		consumed := len(data) - len(rest)
 		enc := AppendVarint(nil, v)
-		if len(enc) > len(data) || len(rest) != len(data)-len(enc) {
-			t.Fatalf("varint %d: encoded %d, input %d, rest %d", v, len(enc), len(data), len(rest))
+		if len(enc) > consumed {
+			t.Fatalf("varint %d: canonical encoding %d octets exceeds the %d consumed", v, len(enc), consumed)
+		}
+		v2, rest2, err := ConsumeVarint(enc)
+		if err != nil || v2 != v || len(rest2) != 0 {
+			t.Fatalf("canonical re-decode of %d: got %d rest %d err %v", v, v2, len(rest2), err)
 		}
 	})
 }
