@@ -13,6 +13,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/netip"
@@ -84,7 +85,7 @@ func NewServer(rawConn *net.UDPConn, tun *dataplane.TUN, cfg ServerConfig) (*Ser
 	}
 	logger := cfg.Logger
 	if logger == nil {
-		logger = log.New(discard{}, "", 0)
+		logger = log.New(io.Discard, "", 0)
 	}
 
 	gate := cfg.Gate

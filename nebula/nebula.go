@@ -47,6 +47,7 @@ import (
 	"crypto/ecdh"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/netip"
@@ -189,7 +190,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 		Lighthouses:  cfg.Lighthouses,
 		AmLighthouse: cfg.AmLighthouse,
 		Logger:       loggerOrDiscard(cfg.Logger),
-	}, newUDPConn(conn), tun)
+	}, dataplane.NewPacketConn(conn), tun)
 	if err != nil {
 		_ = conn.Close()
 		_ = tun.Close()
@@ -292,26 +293,9 @@ func loadIdentity(cfg Config) (*inebula.Identity, *inebula.CAPool, error) {
 
 func loggerOrDiscard(l *log.Logger) inebula.Logger {
 	if l == nil {
-		return log.New(discard{}, "", 0)
+		return log.New(io.Discard, "", 0)
 	}
 	return l
-}
-
-type discard struct{}
-
-func (discard) Write(p []byte) (int, error) { return len(p), nil }
-
-// udpConn adapts *net.UDPConn to the socket the engine expects.
-type udpConn struct{ *net.UDPConn }
-
-func newUDPConn(c *net.UDPConn) *udpConn { return &udpConn{c} }
-
-func (c *udpConn) ReadFrom(b []byte) (int, netip.AddrPort, error) {
-	return c.ReadFromUDPAddrPort(b)
-}
-
-func (c *udpConn) WriteTo(b []byte, addr netip.AddrPort) (int, error) {
-	return c.WriteToUDPAddrPort(b, addr)
 }
 
 // dialer adapts Config to the client registry.

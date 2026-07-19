@@ -56,9 +56,16 @@ var errNotIPv4 = errors.New("nebula: outbound packet is not IPv4")
 
 // packetConn is the UDP socket the host owns, narrowed so tests can substitute
 // an in-memory pair.
+//
+// The method names are net's own rather than the shorter ReadFrom/WriteTo,
+// because that is what makes both *net.UDPConn and dataplane.PacketConn satisfy
+// this directly. The short names forced an adapter in the facade, and that
+// adapter is how nebula ended up being the one UDP server in the tree not
+// replying from the address a datagram arrived on -- the wrapper was available,
+// but nothing here could accept it.
 type packetConn interface {
-	ReadFrom(b []byte) (int, netip.AddrPort, error)
-	WriteTo(b []byte, addr netip.AddrPort) (int, error)
+	ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error)
+	WriteToUDPAddrPort(b []byte, addr netip.AddrPort) (int, error)
 	Close() error
 	LocalAddr() net.Addr
 }
@@ -418,7 +425,7 @@ func (h *Host) sendToPeer(p *peer, datagram []byte) error {
 	}
 	// Only the first candidate is used for data; the others exist so a
 	// handshake can probe them.
-	_, err := h.conn.WriteTo(datagram, addrs[0])
+	_, err := h.conn.WriteToUDPAddrPort(datagram, addrs[0])
 	return err
 }
 
@@ -463,7 +470,7 @@ func (h *Host) beginHandshake(p *peer) {
 	// Probe every candidate: with hole punching, only one may work, and which
 	// one is not knowable in advance.
 	for _, a := range addrs {
-		if _, err := h.conn.WriteTo(msg, a); err != nil {
+		if _, err := h.conn.WriteToUDPAddrPort(msg, a); err != nil {
 			h.log.Printf("nebula: sending handshake to %v: %v", a, err)
 		}
 	}
@@ -473,7 +480,7 @@ func (h *Host) beginHandshake(p *peer) {
 func (h *Host) readUDP() {
 	buf := make([]byte, maxPacket)
 	for {
-		n, from, err := h.conn.ReadFrom(buf)
+		n, from, err := h.conn.ReadFromUDPAddrPort(buf)
 		if err != nil {
 			if !h.isClosed() {
 				h.log.Printf("nebula: UDP read: %v", err)
@@ -530,7 +537,7 @@ func (h *Host) handleHandshake(pkt []byte, hdr header, from netip.AddrPort) {
 			h.log.Printf("nebula: handshake from %v rejected: %v", from, err)
 			return
 		}
-		if _, err := h.conn.WriteTo(reply, from); err != nil {
+		if _, err := h.conn.WriteToUDPAddrPort(reply, from); err != nil {
 			h.log.Printf("nebula: replying to handshake from %v: %v", from, err)
 			return
 		}

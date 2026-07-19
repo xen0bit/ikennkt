@@ -54,7 +54,7 @@ type memConn struct {
 	closed chan struct{}
 }
 
-func (c *memConn) ReadFrom(b []byte) (int, netip.AddrPort, error) {
+func (c *memConn) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
 	select {
 	case d := <-c.queue:
 		return copy(b, d.body), d.from, nil
@@ -63,7 +63,7 @@ func (c *memConn) ReadFrom(b []byte) (int, netip.AddrPort, error) {
 	}
 }
 
-func (c *memConn) WriteTo(b []byte, addr netip.AddrPort) (int, error) {
+func (c *memConn) WriteToUDPAddrPort(b []byte, addr netip.AddrPort) (int, error) {
 	c.fabric.mu.Lock()
 	dst, ok := c.fabric.conns[addr]
 	if !ok {

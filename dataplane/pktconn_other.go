@@ -11,6 +11,7 @@ package dataplane
 
 import (
 	"net"
+	"net/netip"
 	"time"
 )
 
@@ -34,6 +35,17 @@ func (p *PacketConn) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
 // WriteToUDP sends one datagram, letting the kernel choose the source.
 func (p *PacketConn) WriteToUDP(b []byte, to *net.UDPAddr) (int, error) {
 	return p.conn.WriteToUDP(b, to)
+}
+
+// ReadFromUDPAddrPort and WriteToUDPAddrPort are the netip forms, matching the
+// Linux build's surface so a protocol that speaks netip.AddrPort compiles the
+// same either way. Here they go straight to the socket.
+func (p *PacketConn) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
+	return p.conn.ReadFromUDPAddrPort(b)
+}
+
+func (p *PacketConn) WriteToUDPAddrPort(b []byte, to netip.AddrPort) (int, error) {
+	return p.conn.WriteToUDPAddrPort(b, to)
 }
 
 // Close closes the socket.

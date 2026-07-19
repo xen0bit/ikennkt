@@ -135,6 +135,28 @@ func (p *PacketConn) WriteToUDP(b []byte, to *net.UDPAddr) (int, error) {
 	return n, err
 }
 
+// ReadFromUDPAddrPort and WriteToUDPAddrPort are the netip forms, for engines
+// that speak netip.AddrPort rather than *net.UDPAddr. They are not a second
+// implementation — they convert and delegate — so a protocol does not have to
+// choose between the address type it wants and having its source address
+// preserved. Nebula wanted exactly that, and for a while had a private adapter
+// over a bare socket instead, which quietly opted it out of this whole file.
+func (p *PacketConn) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
+	n, from, err := p.ReadFromUDP(b)
+	if from == nil {
+		return n, netip.AddrPort{}, err
+	}
+	ap, ok := addrPortOf(from)
+	if !ok {
+		return n, netip.AddrPort{}, err
+	}
+	return n, ap, err
+}
+
+func (p *PacketConn) WriteToUDPAddrPort(b []byte, to netip.AddrPort) (int, error) {
+	return p.WriteToUDP(b, net.UDPAddrFromAddrPort(to))
+}
+
 // Close closes the socket.
 func (p *PacketConn) Close() error { return p.conn.Close() }
 
