@@ -1,0 +1,46 @@
+# veepin TOY client -> independent Python TOY server.
+#
+# The peer here shares no code, no language and no libraries with veepin: it was
+# written from internal/toy/SPEC.md. That makes this cell a test of the
+# *specification* rather than of the implementation — if veepin's framing, key
+# derivation, keystream, tag or handshake drift from the document, the ping
+# stops crossing.
+#
+# Data-path check: the veepin client pings 10.9.0.1, the peer's gateway.
+name: veepin-interop-toy
+
+x-toy-creds: &toy-creds
+  USER: "alice"
+  # A throwaway test value. TOY provides no security regardless of what this is;
+  # see internal/toy/SPEC.md.
+  SECRET: "example-shared-secret"
+
+services:
+  toy-server:
+    build:
+      context: toy
+    image: interop-toy
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      <<: *toy-creds
+      POOL_BASE: "10.9.0"
+      GATEWAY: "10.9.0.1"
+    volumes:
+      - ./toy/server-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-toy-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [toy-server]
+    environment:
+      <<: *toy-creds
+      SERVER: "toy-server"
+    volumes:
+      - ./veepin/toy-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

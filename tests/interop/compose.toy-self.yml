@@ -1,0 +1,45 @@
+# veepin <-> veepin TOY over real sockets and TUNs.
+#
+# The sanity check: both roles are veepin, so a failure here is a veepin break
+# rather than a disagreement with the independent peer. Running it alongside the
+# two cross-implementation cells is what makes a failure attributable — if this
+# passes and the others do not, the spec and the implementation have diverged.
+#
+# Data-path check: the veepin client pings 10.9.0.1, the veepin server's gateway.
+name: veepin-interop-toy-self
+
+x-toy-creds: &toy-creds
+  USER: "alice"
+  SECRET: "example-shared-secret"
+
+services:
+  veepin-toy-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      <<: *toy-creds
+      POOL: "10.9.0.0/24"
+    volumes:
+      - ./veepin/toy-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-toy-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-toy-server]
+    environment:
+      <<: *toy-creds
+      SERVER: "veepin-toy-server"
+    volumes:
+      - ./veepin/toy-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

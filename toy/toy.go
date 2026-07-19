@@ -176,8 +176,18 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 		TUNName:    tun.Name(),
 		AssignedIP: itoy.AddrToNetIP(w.AssignedIP),
 		Netmask:    itoy.AddrToNetIP(w.Netmask),
-		Gateway:    itoy.AddrToNetIP(w.Gateway),
-		MTU:        int(w.MTU),
+		// Result.Gateway is the server's *outer* address, not the inner gateway
+		// WELCOME carries. The caller pins a host route to it through the
+		// physical interface so that encapsulated packets are not themselves
+		// routed into the tunnel.
+		//
+		// Getting this wrong is silent and total: filling in the inner gateway
+		// (10.9.0.1) installs a route sending the very address the tunnel exists
+		// to reach out over ethernet, and every ping leaves by the wrong door.
+		// The inner gateway needs no route of its own — AssignedIP and Netmask
+		// already put it on the connected subnet.
+		Gateway: server.IP,
+		MTU:     int(w.MTU),
 	}
 	for _, d := range w.DNS {
 		res.DNS = append(res.DNS, itoy.AddrToNetIP(d))

@@ -220,7 +220,22 @@ told:
 5. **The handshake is unauthenticated in both directions until AUTH**, and
    `CHALLENGE` is never authenticated at all, so an active attacker can
    impersonate the server outright.
-6. **Nothing here was reviewed as cryptography**, because there is no
+6. **The key derivation barely derives anything.** The four blocks differ only
+   in a trailing counter octet, and FNV-1a has almost no avalanche, so they come
+   out nearly identical. A real derived key, printed:
+
+   ```
+   block 0  047ae0563b133f25
+   block 1  047adf563b133d72
+   block 2  047ade563b133bbf
+   block 3  047add563b133a0c
+   ```
+
+   Five of every eight octets are shared across all four blocks. The "32-octet
+   key" carries closer to 12 octets of variation, and the keystream inherits
+   that structure directly. A real KDF (HKDF, say) exists precisely so that
+   related inputs produce unrelated outputs.
+7. **Nothing here was reviewed as cryptography**, because there is no
    cryptography here to review.
 
 Every one of these is a deliberate simplification, and each corresponds to

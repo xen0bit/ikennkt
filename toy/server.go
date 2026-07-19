@@ -70,7 +70,15 @@ type Server struct {
 	closed  bool
 }
 
-// NewServer prepares a server. Nothing binds until ListenAndServe.
+// NewServer validates the configuration, allocates the address pool and opens
+// the TUN. It binds no sockets and changes no host state.
+//
+// The split matters, and it is easy to get wrong: the caller reads TUNName,
+// Gateway and Network *before* calling ListenAndServe, in order to configure
+// host networking around the interface. A server that deferred opening the TUN
+// until ListenAndServe would hand back empty values and take the command down
+// with a nil dereference — which is exactly what an earlier draft of this file
+// did.
 func NewServer(cfg ServerConfig) (*Server, error) {
 	if len(cfg.Users) == 0 {
 		return nil, errors.New("toy: at least one user is required")
@@ -78,7 +86,17 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.Pool == "" {
 		return nil, errors.New("toy: an address pool is required")
 	}
-	return &Server{cfg: cfg}, nil
+
+	pool, _, err := dataplane.NewAddrPool(cfg.Pool)
+	if err != nil {
+		return nil, fmt.Errorf("toy: address pool %q: %w", cfg.Pool, err)
+	}
+	tun, err := dataplane.OpenTUN(cfg.TUNName)
+	if err != nil {
+		return nil, fmt.Errorf("toy: opening TUN: %w", err)
+	}
+
+	return &Server{cfg: cfg, pool: pool, tun: tun}, nil
 }
 
 // ListenAndServe binds and serves until Close. It blocks.
@@ -97,11 +115,6 @@ func (s *Server) ListenAndServe() error {
 	s.started = true
 	s.mu.Unlock()
 
-	pool, _, err := dataplane.NewAddrPool(s.cfg.Pool)
-	if err != nil {
-		return fmt.Errorf("toy: address pool %q: %w", s.cfg.Pool, err)
-	}
-
 	port := s.cfg.Port
 	if port == 0 {
 		port = itoy.DefaultPort
@@ -119,27 +132,20 @@ func (s *Server) ListenAndServe() error {
 		return fmt.Errorf("toy: listening on %s: %w", addr, err)
 	}
 
-	tun, err := dataplane.OpenTUN(s.cfg.TUNName)
-	if err != nil {
-		_ = conn.Close()
-		return fmt.Errorf("toy: opening TUN: %w", err)
-	}
-
 	mtu := s.cfg.MTU
 	if mtu <= 0 {
 		mtu = defaultMTU
 	}
 
-	engine, err := itoy.NewServer(conn, tun, itoy.ServerConfig{
+	engine, err := itoy.NewServer(conn, s.tun, itoy.ServerConfig{
 		Users:  s.cfg.Users,
-		Pool:   pool,
+		Pool:   s.pool,
 		DNS:    s.cfg.DNS,
 		MTU:    uint16(mtu),
 		Logger: s.cfg.Logger,
 	})
 	if err != nil {
 		_ = conn.Close()
-		_ = tun.Close()
 		return err
 	}
 
@@ -149,7 +155,7 @@ func (s *Server) ListenAndServe() error {
 		s.mu.Unlock()
 		return engine.Close()
 	}
-	s.engine, s.tun, s.pool = engine, tun, pool
+	s.engine = engine
 	s.mu.Unlock()
 
 	return engine.Run()
@@ -163,10 +169,16 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.closed = true
-	engine := s.engine
+	engine, tun := s.engine, s.tun
 	s.mu.Unlock()
 
 	if engine == nil {
+		// Constructed but never started: the engine owns the TUN once it exists,
+		// but until then this does, and dropping it here is the difference
+		// between a clean failure and a leaked interface.
+		if tun != nil {
+			return tun.Close()
+		}
 		return nil
 	}
 	return engine.Close()

@@ -1,0 +1,44 @@
+# Independent Python TOY client -> veepin TOY server.
+#
+# The mirror of compose.toy.yml, and the cell that exercises veepin's responder:
+# session allocation, proof verification, address assignment from the pool, and
+# the WELCOME the peer has to be able to parse. A client written from the spec
+# has to be able to complete the handshake veepin offers.
+#
+# Data-path check: the peer pings 10.9.0.1, the veepin server's gateway.
+name: veepin-interop-toy-server
+
+x-toy-creds: &toy-creds
+  USER: "alice"
+  SECRET: "example-shared-secret"
+
+services:
+  veepin-toy-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      <<: *toy-creds
+      POOL: "10.9.0.0/24"
+    volumes:
+      - ./veepin/toy-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  toy-client:
+    build:
+      context: toy
+    image: interop-toy
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-toy-server]
+    environment:
+      <<: *toy-creds
+      SERVER: "veepin-toy-server"
+    volumes:
+      - ./toy/client-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]

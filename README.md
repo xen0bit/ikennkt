@@ -191,6 +191,7 @@ ssh                      public SSH entry point: Dial + NewServer, Config (x/cry
 l2tp                     public L2TP/IPsec entry point: Dial + NewServer, Config
 anyconnect               public AnyConnect entry point: Dial + NewServer, Config
 nebula                   public Nebula entry point: Dial + NewServer (lighthouse), Config
+toy                      public TOY entry point: Dial + NewServer — an INSECURE teaching example
 
 dataplane                TUN device, address pool, packet pump (demux + routing), client routing
 internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers, ChaCha20-Poly1305, BLAKE2s
@@ -223,6 +224,9 @@ internal/dtls                DTLS 1.2 PSK: record layer, handshake flights, frag
 
 internal/nebula              minimal protobuf codec, v1 certificates + CA pool, Noise IX, 16-octet header,
                              AEAD data path with anti-replay, the mesh host engine and the lighthouse protocol
+
+internal/toy                 the TOY example protocol + SPEC.md — NO SECURITY; the smallest complete
+                             illustration of a veepin protocol (handshake, Tunnel, pump, both roles)
 
 internal/ikev1               ISAKMP/IKEv1: payload codec, Main + Quick mode, SKEYID/KEYMAT, CBC IV chaining
 internal/l2tp                RFC 2661 header/AVP codec, reliable control channel, PPP data channel,
@@ -641,6 +645,43 @@ There is no address pool and no user list: a host's address and identity are
 whatever its certificate says, so the CA is the only thing that grants access.
 Revocation is by certificate expiry — veepin does not implement blocklists.
 
+## The example protocol
+
+**TOY provides no security.** It is not one of the eight protocols above; it is a
+worked example of how a protocol is put together here, with the cryptography
+replaced by placeholders simple enough to read in one sitting. Its "encryption"
+is a repeating 32-octet XOR pad and its "authentication" is FNV-1a, a hash-table
+hash. Anyone who can see the traffic can read and forge it.
+
+It exists because each real protocol is large enough that the *shape* of a
+protocol is buried under the details of the real thing. TOY is that shape and
+nothing else:
+
+- a handshake that produces a `client.Result` the caller applies;
+- a data path that is `dataplane.Pump`, driven by a `Tunnel` of about forty
+  lines;
+- both roles on the client registry, so `veepin connect toy` and
+  `veepin serve toy` work like any other protocol;
+- [`internal/toy/SPEC.md`](internal/toy/SPEC.md), which documents the wire
+  format, enumerates seven concrete ways the cryptography fails, and maps each
+  to what a real protocol here does instead.
+
+The interop cells talk to an **independent Python implementation** written from
+that spec, sharing no code, no language and no libraries with veepin. That is
+the point of them: a spec only its own implementation can read is not a spec, so
+those cells test the document rather than the code.
+
+Both roles print an unmissable warning on every startup, with no flag to silence
+it. If you are adding a real protocol, read `internal/toy` in this order:
+`SPEC.md`, `session.go`, `client.go`, `server.go`. Copy the structure. Replace
+every primitive.
+
+```sh
+# Both ends of a throwaway example tunnel. Do not carry anything over it.
+sudo ./veepin serve toy -user alice -insecure-shared-secret example -setup-nat -wan eth0
+sudo ./veepin connect toy -server 10.0.0.5 -user alice -insecure-shared-secret example -full-tunnel=false
+```
+
 ## Connecting an OS client
 
 The server authenticates with a machine PSK plus an identity, and assigns the
@@ -837,6 +878,10 @@ both roles, so all three cells below are exercised.
 | L2TP/IPsec| ✓ strongSwan + xl2tpd       | ✓ strongSwan + xl2tpd       | ✓                      |
 | AnyConnect| ✓ ocserv                    | ✓ openconnect               | ✓                      |
 | Nebula    | ✓ `nebula` (lighthouse)     | ✓ `nebula` (host)           | ✓ (via lighthouse)     |
+| TOY*      | ✓ independent Python peer   | ✓ independent Python peer   | ✓                      |
+
+`*` TOY is a **deliberately insecure example protocol**, not a real one. See
+[The example protocol](#the-example-protocol).
 
 Both roles share one API: a client registers with `client.Register` and is dialed
 by `client.Dial`; a server registers with `client.RegisterServer` and is built by

@@ -19,3 +19,7 @@ nm/bin/
 # Editor / OS cruft
 *.swp
 .DS_Store
+
+# Python bytecode from the TOY interop peer
+__pycache__/
+*.pyc
