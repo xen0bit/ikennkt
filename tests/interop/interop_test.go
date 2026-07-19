@@ -382,6 +382,32 @@ func TestInteropNebulaSelf(t *testing.T) {
 	runInterop(t, "compose.nebula-self.yml", "veepin-host-b", "10.42.0.3")
 }
 
+// TOY is the example protocol (internal/toy) and provides no security; these
+// cells prove the *specification*, not the cryptography. The peer they talk to
+// is an independent Python implementation written from internal/toy/SPEC.md
+// that shares no code, no language and no libraries with veepin, so a drift in
+// framing, key derivation, keystream, tag or handshake stops the ping crossing.
+
+// TestInteropVeepinToyClientReferencePeer runs the veepin TOY client against
+// that independent peer and pings 10.9.0.1, the peer's gateway.
+func TestInteropVeepinToyClientReferencePeer(t *testing.T) {
+	runInterop(t, "compose.toy.yml", "veepin-toy-client", "10.9.0.1")
+}
+
+// TestInteropToyClientVeepinServer is the mirror, exercising veepin's responder:
+// session allocation, proof verification, pool assignment, and a WELCOME the
+// independent client has to be able to parse.
+func TestInteropToyClientVeepinServer(t *testing.T) {
+	runInterop(t, "compose.toy-server.yml", "toy-client", "10.9.0.1")
+}
+
+// TestInteropToySelf is the veepin<->veepin sanity check. Its value is
+// attribution: if it passes while the two cross-implementation cells fail, the
+// spec and the implementation have diverged rather than veepin being broken.
+func TestInteropToySelf(t *testing.T) {
+	runInterop(t, "compose.toy-self.yml", "veepin-toy-client", "10.9.0.1")
+}
+
 // waitPing retries a short ping from pingSvc to target until one reports no loss
 // or pingDeadline elapses, reporting whether the tunnel came up.
 func waitPing(t *testing.T, composeFile, pingSvc, target string) bool {
