@@ -167,6 +167,28 @@ func (s *Server) handleHello(body []byte, from *net.UDPAddr) {
 		return
 	}
 
+	// A HELLO is retransmitted whenever the CHALLENGE is lost, so handling it
+	// must be idempotent. Allocating a fresh session and a fresh pool address
+	// per HELLO would let a lossy link burn one address per retransmission --
+	// ten attempts, ten addresses, until the pending timeout reclaims them --
+	// and a peer that simply repeated the message could exhaust the pool.
+	//
+	// The client nonce identifies the attempt, so a repeat replays the same
+	// CHALLENGE for the same session instead.
+	if id, ok := s.pendingFor(hello.Nonce); ok {
+		s.mu.Lock()
+		p := s.pending[id]
+		s.mu.Unlock()
+		if p != nil {
+			out := AppendHeader(nil, Header{Type: MsgChallenge, Session: id, Counter: 1})
+			out = AppendNonce(out, p.serverNonce[:])
+			if _, err := s.conn.WriteToUDP(out, from); err != nil {
+				s.log.Printf("toy: resending CHALLENGE to %v: %v", from, err)
+			}
+			return
+		}
+	}
+
 	id, err := s.newSessionID()
 	if err != nil {
 		s.reject(from, 0, "no session available")
@@ -317,6 +339,19 @@ func (s *Server) reject(to *net.UDPAddr, session uint16, reason string) {
 	out := AppendHeader(nil, Header{Type: MsgReject, Session: session, Counter: 1})
 	out = AppendReject(out, reason)
 	_, _ = s.conn.WriteToUDP(out, to)
+}
+
+// pendingFor finds a handshake already under way for a client nonce, so a
+// retransmitted HELLO replays its CHALLENGE rather than starting again.
+func (s *Server) pendingFor(nonce [NonceLen]byte) (uint16, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, p := range s.pending {
+		if p.clientNonce == nonce {
+			return id, true
+		}
+	}
+	return 0, false
 }
 
 // newSessionID picks an unused, unpredictable session ID.
