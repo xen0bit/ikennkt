@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -12,6 +13,10 @@ import (
 )
 
 // Config parameters one DTLS connection.
+//
+// It selects the key exchange by what is set: a PSK gives the AnyConnect
+// pre-shared-key handshake, and a Certificate gives Fortinet's certificate-based
+// ECDHE handshake. The two are never mixed on one connection.
 type Config struct {
 	// PSK is the pre-shared key. For AnyConnect it comes from an RFC 5705
 	// exporter on the CSTP/TLS session, so it is already bound to that session.
@@ -22,10 +27,45 @@ type Config struct {
 	// carries the hex-decoded X-DTLS-App-ID here, which is how a server ties the
 	// UDP flow back to the HTTPS session that authorised it.
 	SessionID []byte
+
+	// Certificate is the server's certificate and key for a certificate-based
+	// (ECDHE-ECDSA) handshake. When set, the connection uses ECDHE rather than
+	// PSK. It is ignored on a client.
+	Certificate *tls.Certificate
+	// InsecureSkipVerify, on a client, skips X.509 chain and hostname validation
+	// of the server certificate. The ServerKeyExchange signature is still checked
+	// against the presented certificate regardless -- that is what proves the
+	// server holds the key -- so this relaxes only trust in the issuer.
+	InsecureSkipVerify bool
+	// VerifyPeerCertificate, on a client, receives the server's raw certificate
+	// chain to pin or otherwise check it; a non-nil error aborts the handshake.
+	VerifyPeerCertificate func(rawCerts [][]byte) error
+	// ServerName is the expected certificate hostname, checked during chain
+	// validation unless InsecureSkipVerify is set.
+	ServerName string
+
 	// MTU bounds handshake fragments. Zero uses a conservative default.
 	MTU int
 	// HandshakeTimeout bounds the whole handshake.
 	HandshakeTimeout time.Duration
+}
+
+// offeredSuites is the cipher-suite list a client offers, chosen by config: a
+// PSK connection offers PSK suites, otherwise the certificate-based ECDHE suites.
+func (c *Conn) offeredSuites() []suite {
+	if len(c.cfg.PSK) == 0 {
+		return ecdheSuites
+	}
+	return pskSuites
+}
+
+// serverSuites is what a server will accept, chosen the same way: a configured
+// certificate means ECDHE, otherwise PSK.
+func (c *Conn) serverSuites() []suite {
+	if c.cfg.Certificate != nil {
+		return ecdheSuites
+	}
+	return pskSuites
 }
 
 // retransmit backs off between flight retransmissions, doubling each time from
