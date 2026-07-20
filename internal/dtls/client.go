@@ -220,7 +220,10 @@ func (c *Conn) verifyServerCertificate(chain [][]byte) error {
 	if err != nil {
 		return fmt.Errorf("dtls: parsing server certificate: %w", err)
 	}
-	roots, _ := x509.SystemCertPool()
+	roots := c.cfg.RootCAs
+	if roots == nil {
+		roots, _ = x509.SystemCertPool()
+	}
 	if roots == nil {
 		roots = x509.NewCertPool()
 	}

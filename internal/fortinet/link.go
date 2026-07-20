@@ -31,6 +31,10 @@ type pppLink struct {
 	// ownsTUN is true for a client, which has the TUN to itself; false for a
 	// server link, which shares one TUN across clients and must not close it.
 	ownsTUN bool
+	// datagram is true when the carrier is DTLS: each datagram holds exactly one
+	// framed record, so records are read whole rather than streamed. Over the TLS
+	// carrier records are a byte stream and this is false.
+	datagram bool
 	// assignedSrc, when set, is the only inner source address this link may send.
 	// A server sets it so one client cannot inject traffic as another; a client
 	// leaves it nil.
@@ -66,8 +70,12 @@ func (l *pppLink) SendPPP(frame []byte) error {
 
 // readLoop reads framed records and dispatches them until the connection ends.
 func (l *pppLink) readLoop() {
+	var dgram []byte
+	if l.datagram {
+		dgram = make([]byte, maxInnerPacket)
+	}
 	for {
-		frame, err := ReadFrame(l.rd())
+		frame, err := l.readFrame(dgram)
 		if err != nil {
 			l.stop(err)
 			return
@@ -90,6 +98,21 @@ func (l *pppLink) readLoop() {
 			l.server.Receive(frame)
 		}
 	}
+}
+
+// readFrame reads one framed record, from the byte stream (TLS) or one whole
+// datagram (DTLS). Over DTLS a record must fit a single datagram, which every
+// PPP frame does.
+func (l *pppLink) readFrame(dgram []byte) ([]byte, error) {
+	if !l.datagram {
+		return ReadFrame(l.rd())
+	}
+	n, err := l.rd().Read(dgram)
+	if err != nil {
+		return nil, err
+	}
+	frame, _, err := ParseFrame(dgram[:n])
+	return frame, err
 }
 
 // tunLoop reads outbound IP packets and sends each as a framed PPP IP frame. It

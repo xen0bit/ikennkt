@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -43,6 +45,9 @@ type Config struct {
 	// ServerName is the expected certificate hostname, checked during chain
 	// validation unless InsecureSkipVerify is set.
 	ServerName string
+	// RootCAs is the set of trust anchors chain validation uses; nil uses the
+	// host's. A private gateway signed by a private CA is the ordinary case here.
+	RootCAs *x509.CertPool
 
 	// MTU bounds handshake fragments. Zero uses a conservative default.
 	MTU int
@@ -192,6 +197,11 @@ func (c *Conn) Read(b []byte) (int, error) {
 			return 0, err
 		}
 		if err := c.processDatagram(c.readBuf[:n]); err != nil {
+			// A close_notify is the peer ending the connection, and it decrypted,
+			// so it is authentic and final.
+			if errors.Is(err, errClosed) {
+				return 0, io.EOF
+			}
 			// A record that fails to decrypt or replays is dropped, not fatal: on
 			// an unreliable transport an attacker can always inject garbage, and
 			// tearing the tunnel down for it would be the vulnerability.
