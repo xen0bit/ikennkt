@@ -55,8 +55,23 @@ jobs:
         run: |
           # -run=^$ so no ordinary tests run; -benchmem for the allocs column the
           # table reports. tee keeps the raw output in the log for debugging.
-          set -o pipefail
+          #
+          # Deliberately no `set -o pipefail`: benchmarks are informational, not a
+          # correctness gate (the ci.yml test job is that). A single flaky
+          # live-network benchmark — e.g. internal/ikev2/ike's UDP-loopback
+          # handshake timing out under CI load — must not sink the whole table
+          # refresh. go test's non-zero exit is swallowed by tee; that flaky row
+          # is simply absent this run and refreshes next time.
           go test -run='^$' -bench=. -benchmem ./... | tee bench.txt
+
+          # But a *total* failure (compile break, empty run) must still fail, or
+          # the table would silently blank. Require a healthy floor of results.
+          count=$(grep -cE '^Benchmark' bench.txt || true)
+          echo "collected $count benchmark result lines"
+          if [ "$count" -lt 20 ]; then
+            echo "::error::only $count benchmark result lines collected; benchmarks did not run"
+            exit 1
+          fi
 
       - name: Refresh benchmark table and commit (push to main)
         if: github.event_name == 'push'
