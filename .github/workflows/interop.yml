@@ -33,6 +33,8 @@ on:
       - "Dockerfile"
       - "tests/interop/**"
       - "cmd/livingreadme/**"
+      - ".github/scripts/living-readme-commit.sh"
+      - ".github/scripts/living-readme-preview.sh"
       - ".github/workflows/interop.yml"
   pull_request:
     branches: [main]
@@ -57,6 +59,8 @@ on:
       - "Dockerfile"
       - "tests/interop/**"
       - "cmd/livingreadme/**"
+      - ".github/scripts/living-readme-commit.sh"
+      - ".github/scripts/living-readme-preview.sh"
       - ".github/workflows/interop.yml"
 
 concurrency:
@@ -100,18 +104,20 @@ jobs:
           # (not tee's) fail the job, so the commit-back steps below run only when
           # every cell passed.
           set -o pipefail
-          go test -tags interop -json -count=1 -timeout 25m ./tests/interop/... | tee interop.json
+          go test -tags interop -json -count=1 -timeout 30m ./tests/interop/... | tee interop.json
 
-      - name: Refresh interop matrix and commit (push to main)
+      # One interop run feeds two regions: the pass/fail matrix and the iperf3
+      # throughput table (both parsed from interop.json), refreshed in one commit.
+      - name: Refresh interop matrix + throughput and commit (push to main)
         if: github.event_name == 'push'
         env:
           SHA: ${{ github.sha }}
           REF: ${{ github.ref_name }}
-        run: .github/scripts/living-readme-commit.sh interop interop.json "interop matrix"
+        run: .github/scripts/living-readme-commit.sh "interop results" interop interop.json interop-benchmark interop.json
 
-      - name: Preview interop matrix diff (pull request)
+      - name: Preview interop matrix + throughput diff (pull request)
         if: github.event_name == 'pull_request'
         env:
           SHA: ${{ github.sha }}
           REF: ${{ github.ref_name }}
-        run: .github/scripts/living-readme-preview.sh interop interop.json
+        run: .github/scripts/living-readme-preview.sh "interop results" interop interop.json interop-benchmark interop.json

@@ -32,7 +32,7 @@ func main() {
 }
 
 func run() error {
-	region := flag.String("region", "", "region to update: benchmark | interop")
+	region := flag.String("region", "", "region to update: benchmark | interop | interop-benchmark")
 	readmePath := flag.String("readme", "README.md", "path to the README file")
 	inPath := flag.String("in", "", "input file to read results from (default stdin)")
 	sha := flag.String("sha", "", "git commit SHA for the provenance footer")
@@ -63,6 +63,8 @@ func run() error {
 		body = livingreadme.RenderBenchmarks(livingreadme.ParseBenchmarks(input), meta)
 	case livingreadme.RegionInterop:
 		body = livingreadme.RenderInterop(livingreadme.ParseTestResults(input), meta)
+	case livingreadme.RegionInteropBench:
+		body = livingreadme.RenderInteropBench(livingreadme.ParseThroughput(input), meta)
 	default:
 		return fmt.Errorf("unknown or unsupported region %q", *region)
 	}
