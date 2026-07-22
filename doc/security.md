@@ -34,7 +34,9 @@ So the ceiling is roughly one core per direction for the *whole* server, not jus
 per tunnel — adding clients does not add parallelism. The crypto is not the limit:
 the `ESPCrypter` is safe to call concurrently and scales linearly with cores
 (`BenchmarkESPDecapParallel`), so it is *parallel-ready* even though the deployed
-path drives it from a single goroutine. Lifting the ceiling therefore means adding
+path drives it from a single goroutine. Inbound reads are batched (`recvmmsg`,
+one syscall for up to 16 datagrams under load), which raises what that one core
+can do without changing the boundary. Lifting the ceiling therefore means adding
 readers (multi-queue TUN outbound, `SO_REUSEPORT` inbound), which brings
 packet-reordering risk and lock contention that nothing here is currently asking
 for — the approach and its costs are sketched in

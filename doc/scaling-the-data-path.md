@@ -1,10 +1,12 @@
 # Scaling the data path past one core per direction
 
-Status: **design note; Option 1's UDP half is partially built.** The batching
+Status: **design note; Option 1's UDP inbound half is built.** The batching
 primitive (`dataplane.BatchConn`) is implemented and measured,
 `dataplane.PacketConn.ReadBatch` carries it into the shared socket wrapper, and
-IKEv2's ESP socket reads through it; the TUN half and everything under Option 2
-are not built. Written while sharpening the
+every single-socket UDP read loop — server and client, across IKEv2, WireGuard,
+OpenVPN, Nebula, and L2TP — reads through one of the two. The TUN half (and with
+it send-side batching) and everything under Option 2 are not built. Written
+while sharpening the
 [security boundary](security.md#throughput-is-bounded-by-one-core-per-direction)
 that states the current ceiling. It captures which protocols the ceiling actually
 binds, the two levers that lift it (in the order worth trying them), and the
@@ -76,11 +78,24 @@ when. **Inbound UDP batching stands alone**: `recvmmsg` drains whatever the
 socket has queued and blocks for one datagram when it has nothing, so it batches
 under load and adds no latency when idle. `dataplane.PacketConn.ReadBatch` is
 that, with each message carrying its own `IP_PKTINFO` control data so batched
-reads keep the wrapper's source-address pinning; IKEv2's port-4500 ESP loop
-reads through it (a bonus: the loop now hands ESP datagrams to the synchronous
-pump without the per-packet copy the single-read loop made). The other
-single-socket protocols are one small read-loop change each — small, but each
-needs its own check that nothing retains the read buffer past the handler.
+reads keep the wrapper's source-address pinning. Every single-socket read loop
+now reads this way: the IKEv2, WireGuard, OpenVPN, and L2TP servers, the Nebula
+host, and the IKEv2, WireGuard, OpenVPN, and L2TP client loops (connected client
+sockets use the bare `dataplane.BatchConn`; the toy example keeps its plain
+single-read loop on purpose — it is teaching code). Each adoption carried its
+own buffer-retention audit, and the audits split the loops in two:
+
+- **Data packets ride borrowed buffers.** For the flat protocols (IKEv2 ESP,
+  WireGuard transport data, OpenVPN data opcodes, Nebula messages) the handler
+  chain decrypts in place and writes the TUN before returning, so the loop hands
+  the batch buffer over directly — the per-packet copy the single-read loops
+  made is gone from these hot paths. Control-plane packets (handshakes, rekeys,
+  session control) are still copied out, because their handling outlives the
+  batch.
+- **L2TP copies everything, data included.** The engine behind its ESP handler
+  parses control AVPs whose handling may alias the packet beyond the loop, so
+  only its syscalls are batched, not the buffer ownership.
+
 **Outbound batching does not stand alone**: `Pump.Run` gets one packet per TUN
 read, so there is no natural accumulation point — holding a packet hoping a
 second arrives adds latency on exactly the interactive traffic that would notice.
@@ -110,17 +125,20 @@ How to read that honestly:
   if there is one, is the TUN GSO half — unmeasured, because it needs a real
   TUN device.
 - **One wiring caveat:** `x/net/ipv4.ReadBatch` allocates each datagram's
-  source address (2 allocs, ~52 B per packet), where the tree's single-read
-  paths use `ReadFromUDPAddrPort` and allocate nothing. `WriteBatch` is
-  allocation-free. Inbound wiring either accepts that cost or hand-rolls
-  `recvmmsg` — a call to make from a profile, not in advance.
+  source address (2 allocs, ~52 B per packet), where the old single-read paths
+  used `ReadFromUDPAddrPort` and allocated nothing. `WriteBatch` is
+  allocation-free. The wiring accepts that cost: on the flat protocols it is
+  more than paid for by the dropped per-packet data copy, and hand-rolling
+  `recvmmsg` stays the escape hatch if a profile ever blames it.
 
-Because egress lives entirely in `Pump`, batching there is **inherited by every
-pump-using protocol** with no protocol code change: `Run` reads a batch,
-`routeOutbound` handles each, `send` flushes a batch. Inbound batching wants the
-shared UDP source described below so it, too, is written once. The `Tunnel`
-interface is unchanged — `Encapsulate`/`Decapsulate` are still called once per
-inner packet; only the transport syscalls are amortised.
+Egress lives entirely in `Pump`, so when the TUN GSO half lands, send-side
+batching there will be **inherited by every pump-using protocol** with no
+protocol code change: `Run` reads a multi-segment batch, `routeOutbound` handles
+each, `send` flushes a batch. (Inbound batching did not need the shared UDP
+source described below after all — `PacketConn.ReadBatch` wrote the mechanism
+once and each read loop adopted it in place.) The `Tunnel` interface is
+unchanged — `Encapsulate`/`Decapsulate` are still called once per inner packet;
+only the transport syscalls are amortised.
 
 Batching alone may lift the ceiling far enough that Option 2 is never needed.
 
@@ -195,8 +213,10 @@ slowdowns:
 
 1. **Profile a saturated tunnel.** Confirm CPU-bound vs syscall-bound; it decides
    whether Option 2 is even worth starting.
-2. **Option 1 — batching** in `Pump` (egress) and a shared UDP source (ingress).
-   Biggest, safest win; inherited by every pump-using protocol.
+2. **Option 1 — batching.** Ingress: **done** — `PacketConn.ReadBatch` /
+   `BatchConn` in every single-socket read loop, measured above. Egress rides on
+   the TUN GSO half, still open; once TUN reads yield batches, `Pump` flushes
+   them and every pump-using protocol inherits it.
 3. **Lock-free pump map** (hazard 3). Pure win, testable in isolation, de-risks
    Option 2.
 4. **Option 2 — per-tunnel-affinity workers**: shared `SO_REUSEPORT` source
