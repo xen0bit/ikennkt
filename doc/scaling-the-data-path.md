@@ -1,7 +1,10 @@
 # Scaling the data path past one core per direction
 
-Status: **design note.** The syscall-batching primitive (`dataplane.BatchConn`)
-is implemented and measured; nothing else here is built. Written while sharpening the
+Status: **design note; Option 1's UDP half is partially built.** The batching
+primitive (`dataplane.BatchConn`) is implemented and measured,
+`dataplane.PacketConn.ReadBatch` carries it into the shared socket wrapper, and
+IKEv2's ESP socket reads through it; the TUN half and everything under Option 2
+are not built. Written while sharpening the
 [security boundary](security.md#throughput-is-bounded-by-one-core-per-direction)
 that states the current ceiling. It captures which protocols the ceiling actually
 binds, the two levers that lift it (in the order worth trying them), and the
@@ -67,6 +70,22 @@ throughput, not from more goroutines.
 - **TUN:** the virtio-net header path (`IFF_VNET_HDR`) so the kernel hands up /
   accepts back GSO super-frames — one read/write for many segments — with
   segmentation offloaded.
+
+The two halves are not symmetric, and the asymmetry decides what can be built
+when. **Inbound UDP batching stands alone**: `recvmmsg` drains whatever the
+socket has queued and blocks for one datagram when it has nothing, so it batches
+under load and adds no latency when idle. `dataplane.PacketConn.ReadBatch` is
+that, with each message carrying its own `IP_PKTINFO` control data so batched
+reads keep the wrapper's source-address pinning; IKEv2's port-4500 ESP loop
+reads through it (a bonus: the loop now hands ESP datagrams to the synchronous
+pump without the per-packet copy the single-read loop made). The other
+single-socket protocols are one small read-loop change each — small, but each
+needs its own check that nothing retains the read buffer past the handler.
+**Outbound batching does not stand alone**: `Pump.Run` gets one packet per TUN
+read, so there is no natural accumulation point — holding a packet hoping a
+second arrives adds latency on exactly the interactive traffic that would notice.
+Send-side `sendmmsg` therefore waits for the TUN GSO half, whose multi-segment
+reads create the batches to flush.
 
 ### Measured: what the UDP half alone buys
 
