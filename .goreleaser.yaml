@@ -33,8 +33,11 @@ builds:
     env:
       - CGO_ENABLED=0
     goos: [linux]
-    goarch: [amd64, arm64, arm]
-    goarm: ["7"]
+    # Every Debian trixie release architecture (pure Go cross-compiles them all):
+    # amd64, arm64, armhf (arm7), armel (arm5, soft-float), i386, ppc64el,
+    # riscv64, s390x.
+    goarch: [amd64, arm64, arm, "386", ppc64le, riscv64, s390x]
+    goarm: ["5", "7"]
     mod_timestamp: "{{ .CommitTimestamp }}"
     flags:
       - -trimpath
