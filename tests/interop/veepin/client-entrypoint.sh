@@ -18,6 +18,7 @@ while [ "$i" -le 30 ]; do
         -id "$CLIENT_ID" \
         -server-id "$SERVER_ID" \
         -tun tun0 \
+        -rekey "${REKEY:-0}" \
         -full-tunnel=false
     echo "veepin-client: attempt $i failed; retrying in 2s"
     i=$((i + 1))
