@@ -211,8 +211,9 @@ is written up in [`doc/architecture.md`](doc/architecture.md).
 
 ## Install
 
-On Debian/Ubuntu (amd64, arm64, armhf), the signed APT repository tracks the
-latest release:
+On Debian/Ubuntu — any Debian release architecture (amd64, arm64, armhf, armel,
+i386, ppc64el, riscv64, s390x) — the signed APT repository tracks the latest
+release:
 
 ```sh
 sudo curl -fsSL https://xen0bit.github.io/veepin/veepin-archive-keyring.gpg \
@@ -223,7 +224,9 @@ sudo apt update && sudo apt install veepin veepin-nm
 ```
 
 `veepin` is the CLI (server + client, no runtime dependencies); `veepin-nm`
-(amd64) adds the NetworkManager desktop integration. The repository signing
+adds the NetworkManager desktop integration and is amd64-only (its editor
+plugin links against host libnm/GTK) — drop it from the command on other
+architectures. The repository signing
 key's fingerprint is pinned in [packaging/apt-signing-key.asc](packaging/apt-signing-key.asc).
 The package ships a systemd template unit — drop arguments in
 `/etc/veepin/<name>.conf` and `systemctl enable --now veepin@<name>` (see

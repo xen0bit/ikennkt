@@ -11,7 +11,7 @@
 # Layout produced under <out-dir>:
 #   pool/main/<pkg>/<pkg>_<ver>_<arch>.deb
 #   dists/stable/{InRelease,Release,Release.gpg}
-#   dists/stable/main/binary-{amd64,arm64,armhf}/Packages{,.gz}
+#   dists/stable/main/binary-<arch>/Packages{,.gz}   (one per $architectures)
 #   veepin-archive-keyring.gpg     (dearmored public key, for signed-by=)
 #   index.html                     (install instructions)
 #
@@ -25,7 +25,9 @@ debs_dir=${1:?usage: build-apt-repo.sh <debs-dir> <out-dir>}
 out_dir=${2:?usage: build-apt-repo.sh <debs-dir> <out-dir>}
 suite=stable
 component=main
-architectures="amd64 arm64 armhf"
+# Every Debian trixie release architecture — the veepin binary is pure Go, so
+# GoReleaser cross-compiles all of them (see goarch in .goreleaser.yaml).
+architectures="amd64 arm64 armhf armel i386 ppc64el riscv64 s390x"
 
 if ! gpg --list-secret-keys --with-colons | grep -q '^sec'; then
     echo "build-apt-repo: no GPG secret key imported; refusing to build an unsigned repo" >&2
@@ -93,7 +95,10 @@ cat > index.html <<'HTML'
 <style>body{font-family:monospace;max-width:48rem;margin:3rem auto;padding:0 1rem}pre{background:#8882;padding:1rem;overflow-x:auto}</style>
 <h1>veepin APT repository</h1>
 <p>Signed repository carrying the latest <a href="https://github.com/xen0bit/veepin">veepin</a>
-release for Debian/Ubuntu (amd64, arm64, armhf). Older versions live on
+release for Debian/Ubuntu on every Debian release architecture (amd64, arm64,
+armhf, armel, i386, ppc64el, riscv64, s390x). <code>veepin-nm</code> (the
+NetworkManager desktop integration) is amd64-only; skip it elsewhere. Older
+versions live on
 <a href="https://github.com/xen0bit/veepin/releases">GitHub Releases</a>.</p>
 <pre>
 sudo curl -fsSL https://xen0bit.github.io/veepin/veepin-archive-keyring.gpg \
