@@ -177,6 +177,12 @@ func (p *Pump) AddTunnel(t Tunnel) {
 // routes. Inbound keys are removed by identity rather than by t.InboundKey(),
 // because a protocol whose demux key rotates (WireGuard on rekey) may have
 // registered several keys through AddInboundKey since AddTunnel ran.
+//
+// Routes are removed by identity too, and for the same reason: a rekey installs
+// the replacement SA before deleting the old one (so no packet is ever without
+// an SA), and the replacement claims the very same prefixes — the client's /32
+// on a server, 0.0.0.0/0 on a client. Retiring the old tunnel must not take the
+// successor's routes with it.
 func (p *Pump) RemoveTunnel(t Tunnel) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -186,7 +192,7 @@ func (p *Pump) RemoveTunnel(t Tunnel) {
 		}
 	}
 	for _, r := range t.Routes() {
-		p.routes.remove(r)
+		p.routes.removeOwned(r, t)
 	}
 }
 
@@ -209,14 +215,6 @@ func (p *Pump) RemoveInboundKey(key uint32) {
 	p.mu.Unlock()
 }
 
-// HandleInbound processes an inbound protected datagram (already stripped of any
-// protocol framing, such as IKEv2's UDP-encap marker). It demuxes to a tunnel,
-// decapsulates, and writes the inner IP packet to the TUN device. from, when
-// non-nil, is the datagram's UDP source: the tunnel's return address is updated
-// to it so replies reach the peer's actual data socket (a road-warrior client
-// sends ESP from a different port than IKE, so the IKE peer address is not a
-// valid ESP return address). Pass nil on a connected socket where the source is
-// implicit (client mode).
 // IdleFor reports how long it has been since the last authenticated inbound
 // packet (data or keepalive) on any tunnel. It is the raw material for a
 // liveness probe: for a protocol whose peer sends periodic keepalives, an
@@ -227,6 +225,14 @@ func (p *Pump) IdleFor() time.Duration {
 	return time.Since(time.Unix(0, p.lastInbound.Load()))
 }
 
+// HandleInbound processes an inbound protected datagram (already stripped of any
+// protocol framing, such as IKEv2's UDP-encap marker). It demuxes to a tunnel,
+// decapsulates, and writes the inner IP packet to the TUN device. from, when
+// non-nil, is the datagram's UDP source: the tunnel's return address is updated
+// to it so replies reach the peer's actual data socket (a road-warrior client
+// sends ESP from a different port than IKE, so the IKE peer address is not a
+// valid ESP return address). Pass nil on a connected socket where the source is
+// implicit (client mode).
 func (p *Pump) HandleInbound(pkt []byte, from *net.UDPAddr) {
 	inner, ok := p.decapInbound(pkt, from)
 	if !ok {

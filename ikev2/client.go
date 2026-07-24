@@ -470,15 +470,18 @@ func (s *session) rekeyChild() error {
 	// immediately uses the new keys the responder just set up. The old inbound
 	// SPI stays registered until we retire it below, so ESP already in flight
 	// under the old SA still decrypts.
+	oldTunnel := s.tunnel
 	s.pump.AddTunnel(newTunnel)
 	s.tunnel = newTunnel
 	s.childInSPI = newRes.InboundSPI
 
-	// Tell the peer to delete the old SA, then retire its inbound key.
+	// Tell the peer to delete the old SA, then retire it here. RemoveTunnel
+	// unregisters by identity — both tunnels claim the same 0.0.0.0/0 route, and
+	// the successor already owns it — so this drops only the old inbound SPI.
 	if err := s.ike.DeleteChildSA(ctx, oldInSPI); err != nil {
 		s.logger.Printf("ikev2: delete of rekeyed-out Child SA failed: %v", err)
 	}
-	s.pump.RemoveInboundKey(oldInSPI)
+	s.pump.RemoveTunnel(oldTunnel)
 	s.logger.Printf("ikev2: Child SA rekeyed (in=%#x out=%#x)", newRes.InboundSPI, newRes.OutboundSPI)
 	return nil
 }
