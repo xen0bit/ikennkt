@@ -69,6 +69,83 @@ func TestEndToEndHandshake(t *testing.T) {
 	it.doLiveness()
 }
 
+// TestEndToEndHandshakeDualStack drives a full handshake against a server that
+// assigns both an IPv4 and an IPv6 internal address, and verifies the client
+// receives both (the v6 as address + prefix length), that the established Child
+// SA carries both assigned addresses, and that they translate to a /32 and a
+// /128 host route. This is the protocol-level proof of the dual-stack config
+// mode that the strongSwan IPv6 interop cell proves on the wire.
+func TestEndToEndHandshakeDualStack(t *testing.T) {
+	psk := []byte("dual stack handshake psk")
+	p500 := freeUDPPort(t)
+	p4500 := freeUDPPort(t)
+
+	wantV4 := net.IPv4(10, 20, 30, 2)
+	wantV6 := net.ParseIP("fd00:20:30::2")
+
+	childCh := make(chan *ChildSA, 1)
+	srv, err := NewServer(Config{
+		ListenIP: "127.0.0.1", Port500: p500, Port4500: p4500,
+		PSK:     psk,
+		LocalID: FQDNIdentity("responder.test"),
+		Logger:  log.New(io.Discard, "", 0),
+		AssignAddr: func() (Assignment, error) {
+			return Assignment{
+				IP4:     wantV4,
+				Netmask: net.IPv4(255, 255, 255, 0),
+				IP6:     wantV6,
+				Prefix6: 64,
+			}, nil
+		},
+		OnChildSA: func(sa *IKESA, c *ChildSA) { childCh <- c },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer srv.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	cli, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: p500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+	_ = cli.SetReadDeadline(time.Now().Add(3 * time.Second))
+
+	it := &initiator{tb: t, conn: cli, psk: psk, id: FQDNIdentity("initiator.test")}
+	it.doSAInit()
+	it.doAuth()
+
+	// The client parsed both families out of the CFG_REPLY.
+	if !it.assignedIP.Equal(wantV4) {
+		t.Errorf("assigned IPv4 = %s, want %s", it.assignedIP, wantV4)
+	}
+	if !it.assignedIP6.Equal(wantV6) {
+		t.Errorf("assigned IPv6 = %s, want %s", it.assignedIP6, wantV6)
+	}
+	if it.prefix6 != 64 {
+		t.Errorf("assigned IPv6 prefix = %d, want 64", it.prefix6)
+	}
+
+	select {
+	case child := <-childCh:
+		if !child.ClientIP.Equal(wantV4) || !child.ClientIP6.Equal(wantV6) {
+			t.Fatalf("child addresses = %s / %s, want %s / %s",
+				child.ClientIP, child.ClientIP6, wantV4, wantV6)
+		}
+		// The server's data path routes each assigned address as a host route.
+		if r := hostRoute(child.ClientIP); len(r) != 1 || r[0].Bits() != 32 {
+			t.Errorf("IPv4 host route = %v, want a single /32", r)
+		}
+		if r := hostRoute6(child.ClientIP6); len(r) != 1 || r[0].Bits() != 128 {
+			t.Errorf("IPv6 host route = %v, want a single /128", r)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no Child SA established")
+	}
+}
+
 // TestEndToEndHandshakeChaCha20 drives a full handshake with the initiator
 // offering only ChaCha20-Poly1305 (RFC 7634) for both the IKE SA and the Child
 // SA, proving the responder negotiates it and both sides derive identical
@@ -179,6 +256,8 @@ type initiator struct {
 
 	// Child SA results.
 	assignedIP                net.IP
+	assignedIP6               net.IP
+	prefix6                   int
 	childOutSPI, childRespSPI uint32
 	childES                   ESPSuite
 	childEncI, childIntegI    []byte
@@ -295,13 +374,15 @@ func (it *initiator) doAuth() {
 
 	it.childOutSPI = newChildSPI()
 	espSPI := u32BE(it.childOutSPI)
-	tsAll := payload.TSPayload{Selectors: []payload.TrafficSelector{allTrafficV4()}}
+	tsAll := payload.TSPayload{Selectors: []payload.TrafficSelector{allTrafficV4(), allTrafficV6()}}
 
-	// CFG_REQUEST asking for an internal address, netmask and DNS.
+	// CFG_REQUEST asking for an internal address (both families), netmask and DNS.
 	cpReq := payload.CPPayload{Type: payload.CFGRequest, Attrs: []payload.CFGAttr{
 		{Type: payload.CFGInternalIP4Address},
 		{Type: payload.CFGInternalIP4Netmask},
 		{Type: payload.CFGInternalIP4DNS},
+		{Type: payload.CFGInternalIP6Address},
+		{Type: payload.CFGInternalIP6DNS},
 	}}
 
 	b := payload.NewBuilder()
@@ -347,12 +428,16 @@ func (it *initiator) doAuth() {
 		it.tb.Fatalf("responder AUTH verification failed: %v", err)
 	}
 
-	// Capture the assigned internal address from the CFG_REPLY.
+	// Capture the assigned internal address(es) from the CFG_REPLY.
 	if cpPay := findInner(inners, payload.TypeCP); cpPay != nil {
 		cp, perr := payload.ParseCP(cpPay.Body)
 		if perr == nil {
 			if v, ok := cp.AttrValue(payload.CFGInternalIP4Address); ok {
 				it.assignedIP = net.IP(v).To4()
+			}
+			if v, ok := cp.AttrValue(payload.CFGInternalIP6Address); ok && len(v) == 17 {
+				it.assignedIP6 = append(net.IP(nil), v[:16]...)
+				it.prefix6 = int(v[16])
 			}
 		}
 	}

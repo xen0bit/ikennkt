@@ -12,11 +12,13 @@ import (
 // server, and the server's public address (which must remain reachable via the
 // physical link so ESP packets don't recurse into the tunnel).
 type ClientNetConfig struct {
-	TUNName    string
-	AssignedIP net.IP
-	Netmask    net.IP
-	ServerIP   net.IP   // VPN server's public IP (host route added outside tunnel)
-	DNS        []net.IP // informational; resolv.conf changes are left to the caller
+	TUNName     string
+	AssignedIP  net.IP
+	Netmask     net.IP
+	AssignedIP6 net.IP   // internal IPv6 address (dual-stack), or nil
+	Prefix6     int      // IPv6 prefix length for AssignedIP6
+	ServerIP    net.IP   // VPN server's public IP (host route added outside tunnel)
+	DNS         []net.IP // informational; resolv.conf changes are left to the caller
 	// FullTunnel routes all traffic through the VPN (default route). When false,
 	// only the assigned subnet is routed and the caller adds its own routes.
 	FullTunnel bool
@@ -32,6 +34,7 @@ type ClientRouter struct {
 	installed bool
 	addedHost bool
 	addedDef  bool
+	addedDef6 bool
 }
 
 // NewClientRouter creates a router for the given configuration.
@@ -51,11 +54,23 @@ func (r *ClientRouter) Apply() error {
 	}
 	r.prevGWIP, r.prevGWDev = gwIP, gwDev
 
-	prefix := maskToPrefix(r.cfg.Netmask)
-	steps := [][]string{
-		{"ip", "addr", "add", fmt.Sprintf("%s/%d", r.cfg.AssignedIP, prefix), "dev", r.cfg.TUNName},
-		{"ip", "link", "set", r.cfg.TUNName, "up"},
+	var steps [][]string
+	if r.cfg.AssignedIP != nil {
+		prefix := maskToPrefix(r.cfg.Netmask)
+		steps = append(steps, []string{"ip", "addr", "add", fmt.Sprintf("%s/%d", r.cfg.AssignedIP, prefix), "dev", r.cfg.TUNName})
 	}
+	if r.cfg.AssignedIP6 != nil {
+		// Widen a host assignment (/128) or an unset prefix to the conventional
+		// /64, so the tunnel's connected route reaches the peer and gateway in a
+		// split tunnel — the IPv6 counterpart of defaulting a missing IPv4 netmask
+		// to /24. A full tunnel routes ::/0 regardless.
+		prefix6 := r.cfg.Prefix6
+		if prefix6 == 0 || prefix6 == 128 {
+			prefix6 = 64
+		}
+		steps = append(steps, []string{"ip", "-6", "addr", "add", fmt.Sprintf("%s/%d", r.cfg.AssignedIP6, prefix6), "dev", r.cfg.TUNName})
+	}
+	steps = append(steps, []string{"ip", "link", "set", r.cfg.TUNName, "up"})
 	for _, s := range steps {
 		if err := run(s); err != nil {
 			return err
@@ -80,12 +95,22 @@ func (r *ClientRouter) Apply() error {
 	// which override the existing default without deleting it (a common VPN
 	// technique that makes restoration trivial).
 	if r.cfg.FullTunnel {
-		for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
-			if err := run([]string{"ip", "route", "add", half, "dev", r.cfg.TUNName}); err != nil {
-				return err
+		if r.cfg.AssignedIP != nil {
+			for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+				if err := run([]string{"ip", "route", "add", half, "dev", r.cfg.TUNName}); err != nil {
+					return err
+				}
 			}
+			r.addedDef = true
 		}
-		r.addedDef = true
+		if r.cfg.AssignedIP6 != nil {
+			for _, half := range []string{"::/1", "8000::/1"} {
+				if err := run([]string{"ip", "-6", "route", "add", half, "dev", r.cfg.TUNName}); err != nil {
+					return err
+				}
+			}
+			r.addedDef6 = true
+		}
 	}
 	return nil
 }
@@ -97,6 +122,13 @@ func (r *ClientRouter) Revert() error {
 	if r.addedDef {
 		for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
 			if err := run([]string{"ip", "route", "del", half, "dev", r.cfg.TUNName}); err != nil {
+				errs = append(errs, err.Error())
+			}
+		}
+	}
+	if r.addedDef6 {
+		for _, half := range []string{"::/1", "8000::/1"} {
+			if err := run([]string{"ip", "-6", "route", "del", half, "dev", r.cfg.TUNName}); err != nil {
 				errs = append(errs, err.Error())
 			}
 		}

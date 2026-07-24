@@ -69,7 +69,7 @@ func (p *Pump) runVnet() {
 // when the transport has one, per-packet sends otherwise. It returns outs
 // reset to length zero so the caller keeps the burst's capacity.
 func (p *Pump) sendSegments(segs [][]byte, outs [][]byte) [][]byte {
-	dst, ok := ipv4Dest(segs[0])
+	dst, ok := innerDest(segs[0])
 	if !ok {
 		return outs[:0]
 	}

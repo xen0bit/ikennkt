@@ -55,12 +55,13 @@ type Config struct {
 	// NAT; setting it improves accuracy.
 	PublicIP net.IP
 
-	// AssignAddr, if set, is called during IKE_AUTH to allocate an internal
-	// tunnel address for a connecting client (CP config mode). Returning a nil IP
-	// means no address is assigned (the Child SA is still created).
-	AssignAddr func() (ip net.IP, netmask net.IP, dns []net.IP, err error)
-	// ReleaseAddr, if set, reclaims an address when the SA is torn down.
-	ReleaseAddr func(ip net.IP)
+	// AssignAddr, if set, is called during IKE_AUTH to allocate internal tunnel
+	// address(es) for a connecting client (CP config mode). It may return an IPv4
+	// address, an IPv6 address, or both (dual-stack); a zero Assignment means no
+	// address is assigned (the Child SA is still created).
+	AssignAddr func() (Assignment, error)
+	// ReleaseAddr, if set, reclaims the assignment when the SA is torn down.
+	ReleaseAddr func(Assignment)
 
 	// DataPath, if set, receives Child SA lifecycle events so a data plane can
 	// route ESP traffic.
@@ -132,10 +133,10 @@ func NewServer(cfg Config) (*Server, error) {
 		cfg.Port4500 = 4500
 	}
 	if len(cfg.LocalTS) == 0 {
-		cfg.LocalTS = []payload.TrafficSelector{allTrafficV4()}
+		cfg.LocalTS = []payload.TrafficSelector{allTrafficV4(), allTrafficV6()}
 	}
 	if len(cfg.RemoteTS) == 0 {
-		cfg.RemoteTS = []payload.TrafficSelector{allTrafficV4()}
+		cfg.RemoteTS = []payload.TrafficSelector{allTrafficV4(), allTrafficV6()}
 	}
 
 	// Bind the sockets eagerly so a returned server is already listening: this
@@ -176,6 +177,18 @@ func NewServer(cfg Config) (*Server, error) {
 	return s, nil
 }
 
+// Assignment is the set of internal addresses handed to a client via the
+// Configuration Payload. Any field may be zero: an IPv4-only server fills IP4 +
+// Netmask, a dual-stack server fills IP6 + Prefix6 as well, and DNS may carry
+// resolvers of either family.
+type Assignment struct {
+	IP4     net.IP // assigned internal IPv4 address, or nil
+	Netmask net.IP // IPv4 netmask for IP4
+	IP6     net.IP // assigned internal IPv6 address, or nil
+	Prefix6 int    // IPv6 prefix length for IP6
+	DNS     []net.IP
+}
+
 func allTrafficV4() payload.TrafficSelector {
 	return payload.TrafficSelector{
 		Type:       payload.TSIPv4AddrRange,
@@ -184,6 +197,22 @@ func allTrafficV4() payload.TrafficSelector {
 		EndPort:    65535,
 		StartAddr:  net.IPv4zero.To4(),
 		EndAddr:    net.IP{255, 255, 255, 255},
+	}
+}
+
+// allTrafficV6 is the IPv6 counterpart of allTrafficV4: every IPv6 address,
+// every port, every protocol (::/0 as a TS range).
+func allTrafficV6() payload.TrafficSelector {
+	return payload.TrafficSelector{
+		Type:       payload.TSIPv6AddrRange,
+		IPProtocol: payload.IPProtoAny,
+		StartPort:  0,
+		EndPort:    65535,
+		StartAddr:  net.IPv6zero,
+		EndAddr: net.IP{
+			0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+			0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		},
 	}
 }
 
@@ -317,8 +346,8 @@ func (s *Server) deleteSA(sa *IKESA) {
 	if sa.RemoteAddr != nil && s.byRemote[sa.RemoteAddr.String()] == sa {
 		delete(s.byRemote, sa.RemoteAddr.String())
 	}
-	if s.cfg.ReleaseAddr != nil && sa.ClientIP != nil {
-		s.cfg.ReleaseAddr(sa.ClientIP)
+	if s.cfg.ReleaseAddr != nil && (sa.ClientIP != nil || sa.ClientIP6 != nil) {
+		s.cfg.ReleaseAddr(sa.assigned)
 	}
 }
 

@@ -48,6 +48,11 @@ const (
 	// every IPv4 host to accept 576 octets, so below this a tunnel cannot carry
 	// traffic that any correspondent is obliged to handle.
 	MinInnerMTU = 576
+
+	// MinIPv6MTU is the IPv6 minimum link MTU (RFC 8200 §5): every IPv6 link must
+	// carry 1280 octets, and a node must never lower its path MTU below it. An
+	// ICMPv6 Packet Too Big therefore never advertises less than this.
+	MinIPv6MTU = 1280
 )
 
 // OuterUDP4 is the cost of carrying a tunnel over UDP in IPv4: the outer IP

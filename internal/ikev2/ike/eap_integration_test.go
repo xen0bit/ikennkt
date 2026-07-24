@@ -32,8 +32,8 @@ func TestEAPMSCHAPv2Flow(t *testing.T) {
 		Logger:         log.New(io.Discard, "", 0),
 		EAPCredentials: func(u string) (string, bool) { p, ok := users[u]; return p, ok },
 		EAPServerName:  "vpn.example",
-		AssignAddr: func() (net.IP, net.IP, []net.IP, error) {
-			return net.IPv4(10, 9, 8, 7), net.IPv4(255, 255, 255, 0), nil, nil
+		AssignAddr: func() (Assignment, error) {
+			return Assignment{IP4: net.IPv4(10, 9, 8, 7), Netmask: net.IPv4(255, 255, 255, 0)}, nil
 		},
 		OnChildSA: func(sa *IKESA, c *ChildSA) { established <- c },
 	}

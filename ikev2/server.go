@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 
@@ -34,9 +35,12 @@ type ServerConfig struct {
 	// detection. If nil, detection still works but may over-report NAT.
 	PublicIP net.IP
 
-	// Pool is the internal address pool handed to clients in CIDR form
+	// Pool is the internal IPv4 address pool handed to clients in CIDR form
 	// (default 10.10.10.0/24). Its first host is the server's tunnel address.
 	Pool string
+	// Pool6 is the internal IPv6 address pool (default fd00:10:10::/64). When set,
+	// clients are assigned an IPv6 address as well (dual-stack) via config mode.
+	Pool6 string
 	// DNS servers pushed to clients via config mode.
 	DNS []net.IP
 
@@ -67,12 +71,14 @@ type ServerConfig struct {
 // networking (interface address, forwarding, NAT). Gateway and Network report
 // what a caller needs to do that itself.
 type Server struct {
-	ike  *ike.Server
-	pump *dataplane.Pump
-	tun  *dataplane.TUN
-	pool *dataplane.AddrPool
+	ike   *ike.Server
+	pump  *dataplane.Pump
+	tun   *dataplane.TUN
+	pool  *dataplane.AddrPool
+	pool6 *dataplane.AddrPool6 // nil unless dual-stack
 
-	gateway net.IP
+	gateway  net.IP
+	gateway6 netip.Addr
 }
 
 // NewServer builds a server from cfg: it opens the TUN device, creates the
@@ -120,6 +126,15 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("ikev2: address pool: %w", err)
 	}
 
+	pool6CIDR := cfg.Pool6
+	if pool6CIDR == "" {
+		pool6CIDR = "fd00:10:10::/64"
+	}
+	pool6, gateway6, err := dataplane.NewAddrPool6(pool6CIDR)
+	if err != nil {
+		return nil, fmt.Errorf("ikev2: IPv6 address pool: %w", err)
+	}
+
 	var eapLookup eap.CredentialLookup
 	if cfg.EAPUsers != "" {
 		store, lerr := eap.LoadFileStore(cfg.EAPUsers)
@@ -147,14 +162,30 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		ServerCert: serverCert,
 		ClientCAs:  clientCAs,
 		Logger:     logger,
-		AssignAddr: func() (net.IP, net.IP, []net.IP, error) {
+		AssignAddr: func() (ike.Assignment, error) {
 			ip, aerr := pool.Allocate()
 			if aerr != nil {
-				return nil, nil, nil, aerr
+				return ike.Assignment{}, aerr
 			}
-			return ip, pool.Netmask(), cfg.DNS, nil
+			a := ike.Assignment{IP4: ip, Netmask: pool.Netmask(), DNS: cfg.DNS}
+			// Dual-stack: hand out an IPv6 address too. A v6 exhaustion is
+			// non-fatal — the client still gets a working IPv4-only tunnel.
+			if ip6, a6err := pool6.Allocate(); a6err == nil {
+				a.IP6 = net.IP(ip6.AsSlice())
+				a.Prefix6 = pool6.Bits()
+			} else {
+				logger.Printf("ikev2: IPv6 assignment skipped: %v", a6err)
+			}
+			return a, nil
 		},
-		ReleaseAddr:    func(ip net.IP) { pool.Release(ip) },
+		ReleaseAddr: func(a ike.Assignment) {
+			pool.Release(a.IP4)
+			if a.IP6 != nil {
+				if ip6, ok := netip.AddrFromSlice(a.IP6); ok {
+					pool6.Release(ip6)
+				}
+			}
+		},
 		EAPCredentials: eapLookup,
 		EAPServerName:  cfg.LocalID,
 	})
@@ -169,7 +200,11 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	pump.SetBatchSender(srv.SendESPBatch)
 	srv.SetDataPath(ike.NewPumpDataPath(pump))
 
-	return &Server{ike: srv, pump: pump, tun: tun, pool: pool, gateway: gateway}, nil
+	return &Server{
+		ike: srv, pump: pump, tun: tun,
+		pool: pool, pool6: pool6,
+		gateway: gateway, gateway6: gateway6,
+	}, nil
 }
 
 // TUNName is the interface the data path is bound to.
@@ -178,8 +213,14 @@ func (s *Server) TUNName() string { return s.tun.Name() }
 // Gateway is the server's own tunnel-side address (the pool's first host).
 func (s *Server) Gateway() net.IP { return s.gateway }
 
+// Gateway6 is the server's tunnel-side IPv6 address (the v6 pool's first host).
+func (s *Server) Gateway6() netip.Addr { return s.gateway6 }
+
 // Network is the tunnel subnet, for routing and NAT rules.
 func (s *Server) Network() *net.IPNet { return s.pool.Network() }
+
+// Network6 is the tunnel's IPv6 subnet, for routing and NAT rules.
+func (s *Server) Network6() netip.Prefix { return s.pool6.Prefix() }
 
 // ListenAndServe starts the data path and serves IKE until Close.
 func (s *Server) ListenAndServe() error {
@@ -202,6 +243,7 @@ const (
 	OptServerPSK      = "psk"       // pre-shared key (required)
 	OptServerIdentity = "id"        // server identity presented to clients (required)
 	OptServerPool     = "pool"      // internal address pool, CIDR (default 10.10.10.0/24)
+	OptServerPool6    = "pool6"     // internal IPv6 address pool, CIDR (default fd00:10:10::/64)
 	OptServerDNS      = "dns"       // comma-separated DNS servers pushed to clients
 	OptServerTUN      = "tun"       // TUN interface name (empty = kernel picks)
 	OptServerEAPUsers = "eap-users" // path to a username:password file enabling EAP-MSCHAPv2
@@ -221,6 +263,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		PSK:          opts[OptServerPSK],
 		LocalID:      opts[OptServerIdentity],
 		Pool:         opts[OptServerPool],
+		Pool6:        opts[OptServerPool6],
 		TUNName:      opts[OptServerTUN],
 		EAPUsers:     opts[OptServerEAPUsers],
 		CertFile:     opts[OptServerCert],

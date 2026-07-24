@@ -358,6 +358,7 @@ func (s *Server) finishIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 	if respChild != nil {
 		respChild.UDPEncap = sa.NAT.natDetected() || sa.OnPort4500
 		respChild.ClientIP = sa.ClientIP
+		respChild.ClientIP6 = sa.ClientIP6
 		respChild.PeerAddr = remote
 	}
 
@@ -383,20 +384,32 @@ func (s *Server) buildCPReply(sa *IKESA, cpPay *payload.RawPayload) *payload.CPP
 	if err != nil || req.Type != payload.CFGRequest {
 		return nil
 	}
-	ip, netmask, dns, err := s.cfg.AssignAddr()
-	if err != nil || ip == nil {
+	a, err := s.cfg.AssignAddr()
+	if err != nil || (a.IP4 == nil && a.IP6 == nil) {
 		s.log.Printf("ikev2: address assignment failed: %v", err)
 		return nil
 	}
-	sa.ClientIP = ip
+	sa.ClientIP = a.IP4
+	sa.ClientIP6 = a.IP6
+	sa.assigned = a
 	reply := &payload.CPPayload{Type: payload.CFGReply}
-	reply.Attrs = append(reply.Attrs, payload.CFGAttr{Type: payload.CFGInternalIP4Address, Value: ip.To4()})
-	if netmask != nil {
-		reply.Attrs = append(reply.Attrs, payload.CFGAttr{Type: payload.CFGInternalIP4Netmask, Value: netmask.To4()})
+	if a.IP4 != nil {
+		reply.Attrs = append(reply.Attrs, payload.CFGAttr{Type: payload.CFGInternalIP4Address, Value: a.IP4.To4()})
+		if a.Netmask != nil {
+			reply.Attrs = append(reply.Attrs, payload.CFGAttr{Type: payload.CFGInternalIP4Netmask, Value: a.Netmask.To4()})
+		}
 	}
-	for _, d := range dns {
+	if a.IP6 != nil {
+		// INTERNAL_IP6_ADDRESS is 16 address octets followed by a 1-octet prefix
+		// length (RFC 7296 3.15.1), unlike the IPv4 address/netmask split.
+		val := append(append([]byte(nil), a.IP6.To16()...), byte(a.Prefix6))
+		reply.Attrs = append(reply.Attrs, payload.CFGAttr{Type: payload.CFGInternalIP6Address, Value: val})
+	}
+	for _, d := range a.DNS {
 		if v4 := d.To4(); v4 != nil {
 			reply.Attrs = append(reply.Attrs, payload.CFGAttr{Type: payload.CFGInternalIP4DNS, Value: v4})
+		} else if v6 := d.To16(); v6 != nil {
+			reply.Attrs = append(reply.Attrs, payload.CFGAttr{Type: payload.CFGInternalIP6DNS, Value: v6})
 		}
 	}
 	return reply

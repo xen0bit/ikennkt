@@ -68,6 +68,11 @@ type Result struct {
 	// Netmask is the internal address's netmask, and with AssignedIP determines
 	// the connected route above.
 	Netmask net.IP
+	// AssignedIP6 is the internal IPv6 address the server assigned (dual-stack),
+	// or nil. Like AssignedIP, adding it to TUNName creates its connected route.
+	AssignedIP6 net.IP
+	// Prefix6 is AssignedIP6's prefix length.
+	Prefix6 int
 
 	// Gateway is the server's OUTER address -- the one the client dialled, on
 	// the underlying network. It is not an address inside the tunnel.
@@ -109,7 +114,7 @@ func (r Result) Validate() error {
 	if r.TUNName == "" {
 		return errors.New("client: result names no interface")
 	}
-	if r.AssignedIP == nil {
+	if r.AssignedIP == nil && r.AssignedIP6 == nil {
 		return errors.New("client: result assigns no address")
 	}
 	if r.MTU < 0 {

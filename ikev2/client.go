@@ -440,15 +440,17 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	}
 
 	out := client.Result{
-		TUNName:    tun.Name(),
-		AssignedIP: res.AssignedIP,
-		Netmask:    res.Netmask,
-		Gateway:    serverGateway(res, cfg.Server),
-		DNS:        res.DNS,
-		MTU:        client.DefaultTunnelMTU,
+		TUNName:     tun.Name(),
+		AssignedIP:  res.AssignedIP,
+		Netmask:     res.Netmask,
+		AssignedIP6: res.AssignedIP6,
+		Prefix6:     res.Prefix6,
+		Gateway:     serverGateway(res, cfg.Server),
+		DNS:         res.DNS,
+		MTU:         client.DefaultTunnelMTU,
 	}
-	logger.Printf("ikev2: tunnel up on %s, internal IP %s, DNS %v",
-		out.TUNName, out.AssignedIP, out.DNS)
+	logger.Printf("ikev2: tunnel up on %s, internal IP %s / %s, DNS %v",
+		out.TUNName, out.AssignedIP, out.AssignedIP6, out.DNS)
 	return s, out, nil
 }
 

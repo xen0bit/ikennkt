@@ -44,8 +44,8 @@ func mobikeServer(t *testing.T) (p500, p4500 int, srv *Server, dp *capturingData
 		LocalID:  FQDNIdentity("vpn.example"),
 		PublicIP: net.ParseIP("127.0.0.1"),
 		Logger:   log.New(io.Discard, "", 0),
-		AssignAddr: func() (net.IP, net.IP, []net.IP, error) {
-			return net.IPv4(10, 9, 9, 9), net.IPv4(255, 255, 255, 0), nil, nil
+		AssignAddr: func() (Assignment, error) {
+			return Assignment{IP4: net.IPv4(10, 9, 9, 9), Netmask: net.IPv4(255, 255, 255, 0)}, nil
 		},
 		DataPath: dp,
 	}

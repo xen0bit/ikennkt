@@ -1,0 +1,61 @@
+# Direction A dual-stack: veepin client (ikev2) -> strongSwan responder that
+# assigns both an IPv4 and an IPv6 virtual address and offers v4+v6 traffic
+# selectors. Only the INNER packets are dual-stack; the outer ESP transport stays
+# IPv4 NAT-T/UDP-4500 — the veepin client dials strongSwan by its IPv4 literal so
+# the transport can never float to v6. Data-path check: the client pings
+# 10.20.30.254 and fd00:20:30::254 (both strongSwan-side, inside the tunnel).
+#
+# The compose network is dual-stack (enable_ipv6) for one reason: Docker
+# otherwise leaves IPv6 disabled on the container's eth0, and strongSwan delivers
+# the XFRM-decrypted inner v6 packet as if it arrived on eth0 — a disabled-IPv6
+# interface drops it. Giving eth0 a v6 address makes the kernel accept it and lets
+# strongSwan install its v6 return route.
+name: veepin-interop-a-v6
+
+networks:
+  dual:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
+        - subnet: fd00:c0de::/64
+
+services:
+  strongswan-server:
+    build:
+      context: strongswan
+    image: interop-strongswan
+    cap_add: [NET_ADMIN]
+    # rp_filter must be 0 (see compose.client-ss.yml). IPv6 forwarding lets the
+    # kernel accept the XFRM-decrypted inner v6 packets; there is no v6 rp_filter.
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+    networks:
+      dual:
+        ipv4_address: 172.31.0.10
+    volumes:
+      - ./strongswan/swanctl-server-v6.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan/server-entrypoint-v6.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [strongswan-server]
+    networks: [dual]
+    environment:
+      # IPv4 literal: the ESP/IKE transport stays on IPv4 regardless of DNS.
+      SERVER: "172.31.0.10"
+      PSK: "interop-test-psk"
+      CLIENT_ID: "client.example.com"
+      SERVER_ID: "vpn.example.com"
+    volumes:
+      - ./veepin/client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
