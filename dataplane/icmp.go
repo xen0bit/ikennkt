@@ -38,20 +38,26 @@ const (
 )
 
 // NeedsFragmentation reports whether an inner packet is too large for a tunnel
-// of the given MTU and has DF set, meaning the sender must be told rather than
-// the packet silently dropped.
+// of the given MTU and the sender must be told rather than the packet silently
+// dropped. For IPv4 that means DF is set; for IPv6, every oversized packet
+// qualifies, since IPv6 routers never fragment in transit — the host owns path
+// MTU discovery (RFC 8200 §5).
 //
-// A packet over the MTU *without* DF is a different case: the sender has
+// An IPv4 packet over the MTU *without* DF is a different case: the sender has
 // permitted fragmentation, so dropping it is a plain loss rather than a
 // black hole, and no notification is owed.
 func NeedsFragmentation(pkt []byte, mtu int) bool {
-	if len(pkt) <= mtu || len(pkt) < ipv4HeaderMin {
+	if len(pkt) <= mtu || len(pkt) < 1 {
 		return false
 	}
-	if pkt[0]>>4 != 4 {
+	switch pkt[0] >> 4 {
+	case 4:
+		return len(pkt) >= ipv4HeaderMin && pkt[6]&ipv4FlagDF != 0
+	case 6:
+		return len(pkt) >= IPv6HeaderLen
+	default:
 		return false
 	}
-	return pkt[6]&ipv4FlagDF != 0
 }
 
 // FragNeeded builds an ICMP "fragmentation needed" reply for a packet that will
@@ -62,8 +68,12 @@ func NeedsFragmentation(pkt []byte, mtu int) bool {
 // ignored, and rightly so. Returning it to the TUN rather than the network is
 // what makes this work — the tunnel *is* the constrained hop.
 //
-// It returns nil if the input is not something an error can be built for.
+// It returns nil if the input is not something an error can be built for. For an
+// IPv6 packet it builds an ICMPv6 Packet Too Big instead (see fragNeededV6).
 func FragNeeded(pkt []byte, mtu int) []byte {
+	if len(pkt) >= 1 && pkt[0]>>4 == 6 {
+		return fragNeededV6(pkt, mtu)
+	}
 	if len(pkt) < ipv4HeaderMin || pkt[0]>>4 != 4 {
 		return nil
 	}
@@ -148,15 +158,27 @@ func putICMPChecksum(icmp []byte) {
 	binary.BigEndian.PutUint16(icmp[2:4], onesComplement(icmp))
 }
 
-// onesComplement is the internet checksum (RFC 1071).
+// onesComplement is the internet checksum (RFC 1071) over a single buffer.
 func onesComplement(b []byte) uint16 {
-	var sum uint32
+	return checksumFold(checksumAccumulate(0, b))
+}
+
+// checksumAccumulate adds b's 16-bit words to a running one's-complement sum,
+// so a checksum can span several buffers (an IPv6 pseudo-header plus the ICMPv6
+// message, for instance). An odd trailing byte is treated as the high octet of a
+// final word, matching RFC 1071.
+func checksumAccumulate(sum uint32, b []byte) uint32 {
 	for i := 0; i+1 < len(b); i += 2 {
 		sum += uint32(binary.BigEndian.Uint16(b[i : i+2]))
 	}
 	if len(b)%2 == 1 {
 		sum += uint32(b[len(b)-1]) << 8
 	}
+	return sum
+}
+
+// checksumFold collapses an accumulated sum to the final 16-bit checksum.
+func checksumFold(sum uint32) uint16 {
 	for sum>>16 != 0 {
 		sum = sum&0xffff + sum>>16
 	}

@@ -10,9 +10,9 @@ import (
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
 )
 
-// hostRoute expresses one assigned address as a single-host route. It returns
-// nil for an address that is not IPv4, which leaves the tunnel unrouted rather
-// than routing it wrongly.
+// hostRoute expresses one assigned IPv4 address as a single-host /32 route. It
+// returns nil for a non-IPv4 (or nil) address, which leaves that family unrouted
+// rather than routing it wrongly.
 func hostRoute(ip net.IP) []netip.Prefix {
 	v4 := ip.To4()
 	if v4 == nil {
@@ -25,10 +25,28 @@ func hostRoute(ip net.IP) []netip.Prefix {
 	return []netip.Prefix{netip.PrefixFrom(addr, 32)}
 }
 
+// hostRoute6 expresses one assigned IPv6 address as a single-host /128 route,
+// or nil when no v6 address was assigned.
+func hostRoute6(ip net.IP) []netip.Prefix {
+	if ip == nil {
+		return nil
+	}
+	addr, ok := netip.AddrFromSlice(ip.To16())
+	if !ok || addr.Is4() {
+		return nil
+	}
+	return []netip.Prefix{netip.PrefixFrom(addr, 128)}
+}
+
 // defaultRoute is every IPv4 destination: what a client's single tunnel to its
 // server carries.
 func defaultRoute() []netip.Prefix {
 	return []netip.Prefix{netip.PrefixFrom(netip.IPv4Unspecified(), 0)}
+}
+
+// defaultRoute6 is every IPv6 destination, the v6 half of a full tunnel.
+func defaultRoute6() []netip.Prefix {
+	return []netip.Prefix{netip.PrefixFrom(netip.IPv6Unspecified(), 0)}
 }
 
 // espTunnel adapts an established Child SA to the dataplane.Tunnel interface,
@@ -62,13 +80,19 @@ func (t *espTunnel) SetPeerAddr(a *net.UDPAddr) {
 	t.peer.Store(a)
 }
 
-// Encapsulate protects an inner IPv4 packet as ESP (tunnel mode: the inner
-// packet is a whole IP datagram, next-header = IPv4 = 4).
+// Encapsulate protects one inner IP datagram as ESP (tunnel mode). The inner
+// packet's own version nibble sets the ESP next-header — IPv4 (4) or IPv6 (41) —
+// so one dual-stack Child SA carries both families.
 func (t *espTunnel) Encapsulate(ipPacket []byte) ([]byte, error) {
-	return t.espSA.Encapsulate(ipPacket, 4)
+	nextHeader := byte(4) // IPv4
+	if len(ipPacket) > 0 && ipPacket[0]>>4 == 6 {
+		nextHeader = 41 // IPv6
+	}
+	return t.espSA.Encapsulate(ipPacket, nextHeader)
 }
 
-// Decapsulate opens an ESP packet back to the inner IPv4 datagram.
+// Decapsulate opens an ESP packet back to the inner IP datagram. The inner
+// packet is self-describing, so the discarded next-header need not be consulted.
 func (t *espTunnel) Decapsulate(espPkt []byte) ([]byte, error) {
 	inner, _, err := t.espSA.Decapsulate(espPkt)
 	return inner, err
@@ -104,9 +128,10 @@ func (d *PumpDataPath) AddChild(sa *IKESA, child *ChildSA) {
 	t := &espTunnel{
 		espSA: espSA,
 		inSPI: child.InboundSPI,
-		// Server side: this tunnel carries exactly the one address the peer was
-		// assigned, so its route is that host's /32.
-		routes: hostRoute(child.ClientIP),
+		// Server side: this tunnel carries exactly the address(es) the peer was
+		// assigned, so its routes are that host's /32 and, for a dual-stack peer,
+		// its /128.
+		routes: append(hostRoute(child.ClientIP), hostRoute6(child.ClientIP6)...),
 	}
 	t.peer.Store(child.PeerAddr) // initial return address, refined per inbound ESP
 	d.mu.Lock()

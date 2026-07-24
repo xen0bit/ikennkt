@@ -70,6 +70,16 @@ func TestInteropVeepinClientStrongswanServerCert(t *testing.T) {
 	runInterop(t, "compose.client-ss-cert.yml", "veepin-client", "10.20.30.254")
 }
 
+// TestInteropVeepinClientStrongswanServerIPv6 is Direction A dual-stack: the
+// strongSwan responder assigns both an IPv4 and an IPv6 virtual address and
+// offers v4+v6 traffic selectors, and the veepin client pings a strongSwan-side
+// address in each family across the one Child SA. It proves the INTERNAL_IP6
+// config-mode assignment, the v6 traffic selector, and IPv6-in-ESP (next-header
+// 41) interoperate with strongSwan.
+func TestInteropVeepinClientStrongswanServerIPv6(t *testing.T) {
+	runInterop(t, "compose.client-ss-v6.yml", "veepin-client", "10.20.30.254", "fd00:20:30::254")
+}
+
 // TestInteropStrongswanClientVeepinServerFragmented is Direction B with IKE
 // fragmentation forced (RFC 7383): the strongSwan initiator splits its IKE_AUTH
 // into SKF fragments (fragmentation=force + a small fragment_size), which the
@@ -662,11 +672,13 @@ func waitPing(t *testing.T, composeFile, pingSvc, target string) bool {
 	return false
 }
 
-// runInterop brings up the given compose file, then retries a ping from pingSvc
-// to target across the tunnel until it succeeds or pingDeadline elapses. A
+// runInterop brings up the given compose file, then retries pinging every target
+// from pingSvc across the tunnel until all succeed or pingDeadline elapses. A
 // successful ping proves the full path: handshake, config-mode addressing, and
-// bidirectional ESP. The stack is always torn down; logs are dumped on failure.
-func runInterop(t *testing.T, composeFile, pingSvc, target string) {
+// bidirectional ESP. Passing both an IPv4 and an IPv6 target proves a dual-stack
+// tunnel carries both families (ping auto-selects the family from the literal).
+// The stack is always torn down; logs are dumped on failure.
+func runInterop(t *testing.T, composeFile, pingSvc string, targets ...string) {
 	t.Helper()
 	requireDocker(t)
 
@@ -682,20 +694,26 @@ func runInterop(t *testing.T, composeFile, pingSvc, target string) {
 		_, _ = compose(t, composeFile, "down", "-v", "--timeout", "5")
 	})
 
-	deadline := time.Now().Add(pingDeadline)
-	var last string
-	for time.Now().Before(deadline) {
-		out, err := compose(t, composeFile, "exec", "-T", pingSvc,
-			"ping", "-c2", "-W2", target)
-		if err == nil && strings.Contains(out, "0% packet loss") {
-			t.Logf("tunnel up: %s pinged %s across the tunnel", pingSvc, target)
-			return
+	for _, target := range targets {
+		deadline := time.Now().Add(pingDeadline)
+		var last string
+		ok := false
+		for time.Now().Before(deadline) {
+			out, err := compose(t, composeFile, "exec", "-T", pingSvc,
+				"ping", "-c2", "-W2", target)
+			if err == nil && strings.Contains(out, "0% packet loss") {
+				t.Logf("tunnel up: %s pinged %s across the tunnel", pingSvc, target)
+				ok = true
+				break
+			}
+			last = out
+			time.Sleep(3 * time.Second)
 		}
-		last = out
-		time.Sleep(3 * time.Second)
+		if !ok {
+			t.Fatalf("cross-tunnel ping %s -> %s never succeeded within %s:\n%s",
+				pingSvc, target, pingDeadline, last)
+		}
 	}
-	t.Fatalf("cross-tunnel ping %s -> %s never succeeded within %s:\n%s",
-		pingSvc, target, pingDeadline, last)
 }
 
 // benchWarmup lets an iperf3 server settle before the client connects.

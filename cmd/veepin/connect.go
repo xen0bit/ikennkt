@@ -57,8 +57,8 @@ func runConnect(args []string) error {
 		return err
 	}
 	defer sess.Close()
-	logger.Printf("connected on %s, internal IP %s, netmask %s, DNS %v",
-		res.TUNName, res.AssignedIP, res.Netmask, res.DNS)
+	logger.Printf("connected on %s, internal IP %s (v6 %s), netmask %s, DNS %v",
+		res.TUNName, res.AssignedIP, res.AssignedIP6, res.Netmask, res.DNS)
 
 	// Advisory only. A protocol may have a reason for something unusual, and
 	// refusing to bring up a working tunnel over a heuristic would be worse than
@@ -71,12 +71,14 @@ func runConnect(args []string) error {
 	// 2. Routing.
 	if !*noRoute {
 		router := dataplane.NewClientRouter(dataplane.ClientNetConfig{
-			TUNName:    res.TUNName,
-			AssignedIP: res.AssignedIP,
-			Netmask:    res.Netmask,
-			ServerIP:   res.Gateway,
-			DNS:        res.DNS,
-			FullTunnel: *fullTunnel,
+			TUNName:     res.TUNName,
+			AssignedIP:  res.AssignedIP,
+			Netmask:     res.Netmask,
+			AssignedIP6: res.AssignedIP6,
+			Prefix6:     res.Prefix6,
+			ServerIP:    res.Gateway,
+			DNS:         res.DNS,
+			FullTunnel:  *fullTunnel,
 		})
 		if err := router.Apply(); err != nil {
 			logger.Printf("routing setup failed: %v (continuing without routes)", err)

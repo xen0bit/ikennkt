@@ -70,6 +70,8 @@ type ClientConfig struct {
 type ClientResult struct {
 	AssignedIP  net.IP
 	Netmask     net.IP
+	AssignedIP6 net.IP // internal IPv6 address (dual-stack), or nil
+	Prefix6     int    // IPv6 prefix length for AssignedIP6
 	DNS         []net.IP
 	ServerAddr  *net.UDPAddr // where ESP is sent (port 4500 under NAT-T)
 	UDPEncap    bool
@@ -432,17 +434,31 @@ func (c *Client) authCert() error {
 	return c.applyAuthResult(inners, childOutSPI)
 }
 
+// dualStackTS is the TSi/TSr set the client offers: every IPv4 and every IPv6
+// address, so one Child SA can carry both families (the server narrows/echoes).
+func dualStackTS() payload.TSPayload {
+	return payload.TSPayload{Selectors: []payload.TrafficSelector{allTrafficV4(), allTrafficV6()}}
+}
+
+// dualStackCPRequest is the CFG_REQUEST asking the server to assign an internal
+// address in each family plus DNS, so a dual-stack server hands back both.
+func dualStackCPRequest() payload.CPPayload {
+	return payload.CPPayload{Type: payload.CFGRequest, Attrs: []payload.CFGAttr{
+		{Type: payload.CFGInternalIP4Address},
+		{Type: payload.CFGInternalIP4Netmask},
+		{Type: payload.CFGInternalIP4DNS},
+		{Type: payload.CFGInternalIP6Address},
+		{Type: payload.CFGInternalIP6DNS},
+	}}
+}
+
 // buildCertAuthInner assembles the certificate IKE_AUTH inner payloads: IDi, the
 // certificate chain (leaf first), a CERTREQ, the signed AUTH, then the same CP /
 // Child SA / TS / MOBIKE payloads the PSK path sends.
 func (c *Client) buildCertAuthInner(idBody []byte, method payload.AuthMethod, authData []byte) (*payload.Builder, uint32) {
 	childOutSPI := newChildSPI()
-	tsAll := payload.TSPayload{Selectors: []payload.TrafficSelector{allTrafficV4()}}
-	cpReq := payload.CPPayload{Type: payload.CFGRequest, Attrs: []payload.CFGAttr{
-		{Type: payload.CFGInternalIP4Address},
-		{Type: payload.CFGInternalIP4Netmask},
-		{Type: payload.CFGInternalIP4DNS},
-	}}
+	tsAll := dualStackTS()
+	cpReq := dualStackCPRequest()
 
 	b := payload.NewBuilder()
 	b.Add(payload.TypeIDi, false, idBody)
@@ -624,12 +640,8 @@ func (c *Client) sendEAP(msgID uint32, p eap.Packet) error {
 // payload is omitted (EAP mode). Returns the builder and our chosen Child SPI.
 func (c *Client) buildAuthInner(idBody []byte, auth *payload.AuthPayload) (*payload.Builder, uint32) {
 	childOutSPI := newChildSPI()
-	tsAll := payload.TSPayload{Selectors: []payload.TrafficSelector{allTrafficV4()}}
-	cpReq := payload.CPPayload{Type: payload.CFGRequest, Attrs: []payload.CFGAttr{
-		{Type: payload.CFGInternalIP4Address},
-		{Type: payload.CFGInternalIP4Netmask},
-		{Type: payload.CFGInternalIP4DNS},
-	}}
+	tsAll := dualStackTS()
+	cpReq := dualStackCPRequest()
 
 	b := payload.NewBuilder()
 	b.Add(payload.TypeIDi, false, idBody)
@@ -712,20 +724,28 @@ func (c *Client) applyAuthResult(inners []payload.RawPayload, childOutSPI uint32
 	// CP assignment.
 	if cpPay := findInner(inners, payload.TypeCP); cpPay != nil {
 		if cp, perr := payload.ParseCP(cpPay.Body); perr == nil {
-			if v, ok := cp.AttrValue(payload.CFGInternalIP4Address); ok {
+			if v, ok := cp.AttrValue(payload.CFGInternalIP4Address); ok && len(v) == 4 {
 				res.AssignedIP = net.IP(v).To4()
 			}
-			if v, ok := cp.AttrValue(payload.CFGInternalIP4Netmask); ok {
+			if v, ok := cp.AttrValue(payload.CFGInternalIP4Netmask); ok && len(v) == 4 {
 				res.Netmask = net.IP(v).To4()
 			}
+			// INTERNAL_IP6_ADDRESS is 16 address octets + a 1-octet prefix length.
+			if v, ok := cp.AttrValue(payload.CFGInternalIP6Address); ok && len(v) == 17 {
+				res.AssignedIP6 = append(net.IP(nil), v[:16]...)
+				res.Prefix6 = int(v[16])
+			}
 			for _, a := range cp.Attrs {
-				if a.Type == payload.CFGInternalIP4DNS && len(a.Value) == 4 {
+				switch {
+				case a.Type == payload.CFGInternalIP4DNS && len(a.Value) == 4:
 					res.DNS = append(res.DNS, net.IP(a.Value).To4())
+				case a.Type == payload.CFGInternalIP6DNS && len(a.Value) == 16:
+					res.DNS = append(res.DNS, append(net.IP(nil), a.Value...))
 				}
 			}
 		}
 	}
-	if res.AssignedIP == nil {
+	if res.AssignedIP == nil && res.AssignedIP6 == nil {
 		return fmt.Errorf("server did not assign an internal address")
 	}
 
@@ -1047,8 +1067,8 @@ func (r *ClientResult) BuildTunnel() (dataplane.Tunnel, error) {
 		espSA: sa,
 		inSPI: r.InboundSPI,
 		// Client side: everything leaving the local TUN belongs to the one server,
-		// so this tunnel carries all destinations.
-		routes: defaultRoute(),
+		// so this tunnel carries all destinations in both families.
+		routes: append(defaultRoute(), defaultRoute6()...),
 	}
 	t.peer.Store(r.ServerAddr)
 	return t, nil

@@ -92,6 +92,16 @@ stateDiagram-v2
   PSK. This is what interoperates with strongSwan `pubkey` auth and native
   certificate clients. The classic per-curve ECDSA methods (9/10/11) and RSA-PSS
   are not produced.
+- **Dual-stack config mode: one Child SA carries IPv4 and IPv6.** The server's
+  `AssignAddr` returns an `Assignment` that may hold a v4 address + netmask, a v6
+  address + prefix length, or both. `buildCPReply` emits `INTERNAL_IP4_ADDRESS`/
+  `_NETMASK` and, for a v6 assignment, `INTERNAL_IP6_ADDRESS` (16 address octets
+  followed by a 1-octet prefix length, RFC 7296 3.15.1 — not the v4 address/mask
+  split). The client requests both families and accepts an assignment in either.
+  Both ends offer v4+v6 traffic selectors (`allTrafficV4`/`allTrafficV6`), and the
+  data path selects the ESP next-header from each inner packet's version nibble
+  (4 or 41), so a single Child SA moves both families. The *outer* transport
+  stays IPv4 NAT-T; an IPv6 ESP underlay is out of scope.
 - **NAT-T floats to UDP/4500 and forces UDP-encap of ESP.** The non-ESP marker
   disambiguates IKE from ESP on the shared 4500 socket; the [`esp`](../esp) path
   assumes this encapsulation.

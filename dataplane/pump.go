@@ -336,11 +336,12 @@ func (p *Pump) Run() {
 
 // routeOutbound routes one inner IP packet from the TUN to the tunnel whose
 // route matches its destination most specifically, encapsulates it, and sends
-// it. Non-IPv4 packets and packets matching no route are dropped.
+// it. Packets that are neither IPv4 nor IPv6, and packets matching no route, are
+// dropped.
 func (p *Pump) routeOutbound(pkt []byte) {
-	dst, ok := ipv4Dest(pkt)
+	dst, ok := innerDest(pkt)
 	if !ok {
-		return // not IPv4; this build tunnels IPv4 only
+		return // not an IP packet we can route
 	}
 	p.mu.RLock()
 	t := p.routes.lookup(dst)
@@ -402,13 +403,25 @@ func (p *Pump) Close() {
 	p.mu.Unlock()
 }
 
-// ipv4Dest extracts the destination address from an IPv4 packet header.
-func ipv4Dest(pkt []byte) (uint32, bool) {
-	if len(pkt) < 20 {
-		return 0, false
+// innerDest extracts the destination address from an inner IP packet, for either
+// family. The version nibble selects the layout: IPv4's 4-byte destination sits
+// at offset 16, IPv6's 16-byte destination at offset 24.
+func innerDest(pkt []byte) (netip.Addr, bool) {
+	if len(pkt) < 1 {
+		return netip.Addr{}, false
 	}
-	if pkt[0]>>4 != 4 {
-		return 0, false
+	switch pkt[0] >> 4 {
+	case 4:
+		if len(pkt) < 20 {
+			return netip.Addr{}, false
+		}
+		return netip.AddrFrom4([4]byte(pkt[16:20])), true
+	case 6:
+		if len(pkt) < 40 {
+			return netip.Addr{}, false
+		}
+		return netip.AddrFrom16([16]byte(pkt[24:40])), true
+	default:
+		return netip.Addr{}, false
 	}
-	return binary.BigEndian.Uint32(pkt[16:20]), true
 }

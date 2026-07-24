@@ -83,6 +83,8 @@ func (s *Server) handleRekeyIKE(sa *IKESA, hdr payload.Header, inners []payload.
 	newSA.MobikeEnabled = sa.MobikeEnabled
 	newSA.fragEnabled = sa.fragEnabled
 	newSA.ClientIP = sa.ClientIP
+	newSA.ClientIP6 = sa.ClientIP6
+	newSA.assigned = sa.assigned
 	newSA.PeerID = sa.PeerID
 	newSA.RecvMsgID = 0
 	newSA.SendMsgID = 0
@@ -179,6 +181,7 @@ func (s *Server) handleCreateChildSA(sa *IKESA, hdr payload.Header, inners []pay
 
 	child.UDPEncap = sa.NAT.natDetected() || sa.OnPort4500
 	child.ClientIP = sa.ClientIP
+	child.ClientIP6 = sa.ClientIP6
 	child.PeerAddr = remote
 
 	s.respondEncrypted(sa, payload.CREATE_CHILD_SA, hdr.MessageID, b.FirstType(), b.Bytes(), remote)

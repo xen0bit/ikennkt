@@ -27,13 +27,13 @@ func mustPrefix(t *testing.T, s string) netip.Prefix {
 	return p
 }
 
-func mustIP(t *testing.T, s string) uint32 {
+func mustIP(t *testing.T, s string) netip.Addr {
 	t.Helper()
 	a, err := netip.ParseAddr(s)
 	if err != nil {
 		t.Fatalf("bad addr %q: %v", s, err)
 	}
-	return addrBits(a)
+	return a
 }
 
 // TestRouteTableLongestPrefixWins is the property WireGuard's cryptokey routing
@@ -140,12 +140,42 @@ func TestRouteTableMasksHostBits(t *testing.T) {
 	}
 }
 
-// TestRouteTableIgnoresNonIPv4 documents that the table is IPv4-only, matching
-// the data path, and that an IPv6 prefix is dropped rather than mis-stored.
-func TestRouteTableIgnoresNonIPv4(t *testing.T) {
+// TestRouteTableDualStack covers the v6 trie living alongside the v4 one: a
+// dual-stack tunnel owns a prefix in each family, longest-prefix match works
+// independently per family, and a lookup never crosses families.
+func TestRouteTableDualStack(t *testing.T) {
+	def6 := &namedTunnel{name: "def6"}
+	host6 := &namedTunnel{name: "host6"}
+	v4 := &namedTunnel{name: "v4"}
+
 	var rt routeTable
-	rt.insert(netip.MustParsePrefix("2001:db8::/32"), &namedTunnel{name: "v6"})
-	if !rt.empty() {
-		t.Fatal("an IPv6 prefix was stored in the IPv4 table")
+	rt.insert(mustPrefix(t, "10.0.0.0/8"), v4)
+	rt.insert(mustPrefix(t, "::/0"), def6)
+	rt.insert(mustPrefix(t, "2001:db8::1/128"), host6)
+
+	for _, tc := range []struct {
+		ip   string
+		want *namedTunnel
+	}{
+		{"2001:db8::1", host6}, // exact /128 beats ::/0
+		{"2001:db8::2", def6},  // neighbour falls back to the v6 default
+		{"fe80::1", def6},      // any other v6 address hits ::/0
+		{"10.9.9.9", v4},       // v4 lookup is unaffected by the v6 routes
+	} {
+		got := rt.lookup(mustIP(t, tc.ip))
+		if got != Tunnel(tc.want) {
+			gotName := "<nil>"
+			if g, ok := got.(*namedTunnel); ok {
+				gotName = g.name
+			}
+			t.Errorf("lookup(%s) = %s, want %s", tc.ip, gotName, tc.want.name)
+		}
+	}
+
+	// A v4-only table must not answer a v6 lookup, and vice versa.
+	var only4 routeTable
+	only4.insert(mustPrefix(t, "10.0.0.0/8"), v4)
+	if got := only4.lookup(mustIP(t, "2001:db8::1")); got != nil {
+		t.Error("v6 lookup matched in a v4-only table")
 	}
 }

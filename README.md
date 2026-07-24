@@ -41,7 +41,7 @@ wire detail, caveats and API surface.
 
 | Protocol | Authentication | Data path | Verified against | Docs |
 |----------|----------------|-----------|------------------|------|
-| **IKEv2/ESP** | PSK, EAP-MSCHAPv2, X.509 certificate (RFC 7427) | ESP-in-UDP, RFC 4303 (NAT-T, CP address assignment) | strongSwan | [ikev2](internal/ikev2/ike/README.md) |
+| **IKEv2/ESP** | PSK, EAP-MSCHAPv2, X.509 certificate (RFC 7427) | ESP-in-UDP, RFC 4303 (NAT-T, dual-stack v4/v6 CP address assignment) | strongSwan | [ikev2](internal/ikev2/ike/README.md) |
 | **WireGuard** | Noise_IKpsk2 static keys | ChaCha20-Poly1305, cryptokey routing, client rekey | wireguard-go | [wireguard](internal/wireguard/) |
 | **OpenVPN** | mutual TLS certificates | AES-256-GCM / -CBC; plain, `tls-auth`, `tls-crypt` | `openvpn` | [openvpn](internal/openvpn/) |
 | **SSTP** | MS-CHAPv2 over PPP | PPP/IPCP over TLS, SHA-256 crypto binding | SoftEther, `sstpc`/pppd | [sstp](internal/sstp/wire/README.md) |
@@ -556,9 +556,16 @@ each a localized extension point, not a structural rework:
   Diffie-Hellman exchange for a new control channel — the Child SAs inherited
   unchanged, so the data path never pauses. Neither lets a long-lived tunnel
   expire in place.
-- **IPv4 tunneling; single IKE SA per Child.** IPv6 inner traffic is not
-  forwarded; sufficient for road-warrior clients, not a site-to-site multi-SA
-  gateway.
+- **Dual-stack inner traffic over an IPv4 underlay; single IKE SA per Child.**
+  IKEv2 carries both IPv4 and IPv6 inner traffic over one Child SA: the server
+  assigns a v4 and a v6 address via config mode (`INTERNAL_IP4_*` and the
+  `INTERNAL_IP6_ADDRESS` address+prefix, RFC 7296 3.15), offers v4+v6 traffic
+  selectors, and the data path tags each packet with the ESP next-header its
+  version implies (4 or 41); oversized inner v6 gets an ICMPv6 Packet Too Big,
+  the v6 counterpart of the IPv4 fragmentation-needed path. The *outer* transport
+  is still IPv4 NAT-T/UDP-4500 — an IPv6 ESP underlay is future work — and this
+  is one IKE SA per Child, sufficient for road-warrior clients rather than a
+  site-to-site multi-SA gateway.
 - **AnyConnect's DTLS needs TLS 1.3 or Extended Master Secret** (RFC 7627) — Go's
   `crypto/tls` will not run the RFC 5705 exporter otherwise, so against such a
   peer the client stays on TLS. Only PSK-NEGOTIATE mode; auth is

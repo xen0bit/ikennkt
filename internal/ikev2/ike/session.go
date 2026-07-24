@@ -59,6 +59,8 @@ type ChildSA struct {
 	UDPEncap bool
 	// ClientIP is the internal tunnel address assigned to the peer via CP.
 	ClientIP net.IP
+	// ClientIP6 is the peer's assigned internal IPv6 address (dual-stack), or nil.
+	ClientIP6 net.IP
 	// PeerAddr is the transport address to send encapsulated ESP to (may have
 	// floated to :4500 after NAT-T).
 	PeerAddr *net.UDPAddr
@@ -142,6 +144,11 @@ type IKESA struct {
 
 	// ClientIP is the internal address assigned to this peer via CP.
 	ClientIP net.IP
+	// ClientIP6 is the peer's assigned internal IPv6 address (dual-stack), or nil.
+	ClientIP6 net.IP
+	// assigned records the full address assignment so teardown can release every
+	// leased address (both families) back to its pool.
+	assigned Assignment
 
 	Children map[uint32]*ChildSA // keyed by inbound SPI
 
