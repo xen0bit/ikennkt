@@ -2,6 +2,7 @@ package ike
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 
 	"github.com/xen0bit/veepin/internal/ikev2/eap"
@@ -52,12 +53,20 @@ func (s *Server) handleIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 		return
 	}
 
-	// PSK path (single round trip).
 	auth, err := payload.ParseAuth(authPay.Body)
 	if err != nil {
 		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.InvalidSyntax, remote)
 		return
 	}
+
+	// Certificate path (RFC 7427 Digital Signature, or legacy RSA): the client
+	// signs its AUTH rather than MACing it, and presents a certificate chain.
+	if auth.Method == payload.AuthDigitalSig || auth.Method == payload.AuthRSASig {
+		s.handleCertAuth(sa, hdr, inners, auth, remote)
+		return
+	}
+
+	// PSK path (single round trip).
 	if auth.Method != payload.AuthSharedKeyMIC {
 		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
 		return
@@ -78,6 +87,71 @@ func (s *Server) handleIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 	b.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{
 		Method: payload.AuthSharedKeyMIC, Data: ourAuth,
 	}))
+	s.finishIKEAuth(sa, hdr, inners, b, remote)
+}
+
+// handleCertAuth verifies a certificate-authenticated initiator and responds in
+// kind. The client presented IDi, a certificate chain and a signed AUTH; we
+// chain-verify the certificate to ClientCAs, bind it to IDi, verify the
+// signature over the initiator's signed octets, then sign our own AUTH with the
+// server certificate and return it with our chain and the Child SA.
+func (s *Server) handleCertAuth(sa *IKESA, hdr payload.Header, inners []payload.RawPayload, auth payload.AuthPayload, remote *net.UDPAddr) {
+	if s.cfg.ClientCAs == nil || s.serverCred == nil {
+		s.log.Printf("ikev2: %s offered certificate auth but the server is not configured for it", remote)
+		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
+		return
+	}
+
+	certs := findAllInner(inners, payload.TypeCERT)
+	if len(certs) == 0 {
+		s.log.Printf("ikev2: %s certificate auth with no CERT payload", remote)
+		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
+		return
+	}
+	leafDER, intermediates, perr := parseCertChain(certs)
+	if perr != nil {
+		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
+		return
+	}
+	leaf, err := verifyPeerCertChain(leafDER, intermediates, s.cfg.ClientCAs)
+	if err != nil {
+		s.log.Printf("ikev2: %s certificate chain rejected: %v", remote, err)
+		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
+		return
+	}
+	if err := certMatchesID(leaf, sa.PeerID); err != nil {
+		s.log.Printf("ikev2: %s certificate/identity mismatch: %v", remote, err)
+		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
+		return
+	}
+
+	// The initiator signs InitiatorSAInit | Nr | prf(SK_pi, IDi').
+	octets := AuthOctets(sa.Suite.PRF, sa.InitiatorSAInit, sa.Nr, sa.Keys.SKpi, sa.IDiForAuth)
+	if err := verifyAuth(leaf.PublicKey, auth.Method, octets, auth.Data); err != nil {
+		s.log.Printf("ikev2: %s certificate AUTH failed: %v", remote, err)
+		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
+		return
+	}
+
+	// Our AUTH: sign ResponderSAInit | Ni | prf(SK_pr, IDr') with the server key.
+	localIDBody := idPayloadBody(s.cfg.LocalID)
+	respOctets := AuthOctets(sa.Suite.PRF, sa.ResponderSAInit, sa.Ni, sa.Keys.SKpr, localIDBody)
+	method, authData, err := signAuth(s.serverCred, respOctets, sa.peerSigHashes)
+	if err != nil {
+		s.log.Printf("ikev2: signing server AUTH for %s: %v", remote, err)
+		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
+		return
+	}
+
+	b := payload.NewBuilder()
+	b.Add(payload.TypeIDr, false, localIDBody)
+	for _, der := range s.serverCred.chain {
+		b.Add(payload.TypeCERT, false, payload.MarshalCert(payload.CertPayload{
+			Encoding: payload.CertX509Signature, Data: der,
+		}))
+	}
+	b.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{Method: method, Data: authData}))
+	s.log.Printf("ikev2: certificate auth ok for %s (id=%v)", remote, sa.PeerID.Type)
 	s.finishIKEAuth(sa, hdr, inners, b, remote)
 }
 
@@ -382,6 +456,42 @@ func findInner(inners []payload.RawPayload, t payload.PayloadType) *payload.RawP
 		}
 	}
 	return nil
+}
+
+// findAllInner returns every payload of type t, in order (CERT payloads, of
+// which a chain carries several).
+func findAllInner(inners []payload.RawPayload, t payload.PayloadType) []payload.RawPayload {
+	var out []payload.RawPayload
+	for i := range inners {
+		if inners[i].Type == t {
+			out = append(out, inners[i])
+		}
+	}
+	return out
+}
+
+// parseCertChain splits a run of CERT payloads into the leaf's DER (the first,
+// the end-entity certificate) and the remaining intermediates. Only X.509
+// signature certificates are accepted.
+func parseCertChain(certs []payload.RawPayload) (leafDER []byte, intermediates [][]byte, err error) {
+	for i, cp := range certs {
+		c, perr := payload.ParseCert(cp.Body)
+		if perr != nil {
+			return nil, nil, perr
+		}
+		if c.Encoding != payload.CertX509Signature {
+			return nil, nil, fmt.Errorf("ike: unsupported certificate encoding %d", c.Encoding)
+		}
+		if i == 0 {
+			leafDER = c.Data
+		} else {
+			intermediates = append(intermediates, c.Data)
+		}
+	}
+	if len(leafDER) == 0 {
+		return nil, nil, fmt.Errorf("ike: empty certificate payload")
+	}
+	return leafDER, intermediates, nil
 }
 
 func beU32(b []byte) uint32 {

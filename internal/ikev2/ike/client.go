@@ -2,6 +2,8 @@ package ike
 
 import (
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
@@ -49,6 +51,15 @@ type ClientConfig struct {
 	// EAP-MSCHAPv2 (the server still authenticates itself with the PSK).
 	EAPUsername string
 	EAPPassword string
+
+	// ClientCert, if set, authenticates the client with an X.509 certificate
+	// (RFC 7427 digital signature, or the legacy RSA method against a peer that
+	// does not offer RFC 7427) instead of the PSK. It takes precedence over PSK
+	// but not over EAP.
+	ClientCert *tls.Certificate
+	// CARoots verifies the server's certificate when ClientCert is set. A nil
+	// pool falls back to the host's system roots.
+	CARoots *x509.CertPool
 
 	Logger *log.Logger
 }
@@ -102,6 +113,13 @@ type Client struct {
 
 	result *ClientResult
 
+	// Certificate authentication (set when cfg.ClientCert != nil). certCred is
+	// the local credential we sign AUTH with; caRoots verifies the server's
+	// certificate; peerSigHashes is the server's advertised RFC 7427 hash list.
+	certCred      *certCredential
+	caRoots       *x509.CertPool
+	peerSigHashes []uint16
+
 	serverIDBody []byte // captured IDr body (for EAP final AUTH verification)
 
 	mu     sync.Mutex
@@ -129,7 +147,19 @@ func NewClient(cfg ClientConfig) *Client {
 	if logger == nil {
 		logger = log.New(log.Writer(), "", log.LstdFlags)
 	}
-	return &Client{cfg: cfg, log: logger}
+	c := &Client{cfg: cfg, log: logger}
+	if cfg.ClientCert != nil {
+		cred, err := credentialFromTLS(cfg.ClientCert)
+		if err != nil {
+			// Defer the error to Connect so NewClient stays infallible; a nil
+			// certCred with a non-nil ClientCert is the signal.
+			logger.Printf("ikev2 client: invalid client certificate: %v", err)
+		} else {
+			c.certCred = cred
+		}
+		c.caRoots = cfg.CARoots
+	}
+	return c
 }
 
 // Connect performs IKE_SA_INIT and IKE_AUTH (PSK or EAP), returning the
@@ -172,12 +202,22 @@ func (c *Client) Connect() (*ClientResult, error) {
 		return nil, fmt.Errorf("NAT-T float: %w", err)
 	}
 
-	if c.cfg.EAPUsername != "" {
+	switch {
+	case c.cfg.EAPUsername != "":
 		if err := c.authEAP(); err != nil {
 			c.conn.Close()
 			return nil, fmt.Errorf("IKE_AUTH (EAP): %w", err)
 		}
-	} else {
+	case c.cfg.ClientCert != nil:
+		if c.certCred == nil {
+			c.conn.Close()
+			return nil, fmt.Errorf("IKE_AUTH (cert): client certificate is invalid")
+		}
+		if err := c.authCert(); err != nil {
+			c.conn.Close()
+			return nil, fmt.Errorf("IKE_AUTH (cert): %w", err)
+		}
+	default:
 		if err := c.authPSK(); err != nil {
 			c.conn.Close()
 			return nil, fmt.Errorf("IKE_AUTH (PSK): %w", err)
@@ -266,6 +306,11 @@ func (c *Client) saInit() error {
 	// Advertise IKE fragmentation (RFC 7383) so a server set to always fragment
 	// can deliver large protected responses as reassemblable SKF fragments.
 	addFragSupported(b)
+	// Advertise RFC 7427 signature hashes when we will authenticate with a
+	// certificate, so the responder signs (and accepts) a Digital Signature.
+	if c.certCred != nil {
+		addSigHashNotify(b)
+	}
 	chain := b.Bytes()
 
 	hdr := payload.Header{
@@ -293,6 +338,7 @@ func (c *Client) saInit() error {
 	}
 	c.spiR = msg.Header.ResponderSPI
 	c.frag = findFragSupported(msg.Payloads)
+	c.peerSigHashes = findSigHashes(msg.Payloads)
 
 	saPay := msg.Find(payload.TypeSA)
 	kePay := msg.Find(payload.TypeKE)
@@ -349,6 +395,128 @@ func (c *Client) authPSK() error {
 	// UPDATE_SA_ADDRESSES) is 2.
 	c.sendMsgID = 2
 	return c.finishAuth(inners, childOutSPI, c.cfg.PSK, false)
+}
+
+// --- IKE_AUTH (certificate) ---
+
+// authCert authenticates the client with an X.509 certificate in one round trip
+// (like PSK, but the AUTH payload is a signature rather than a MAC). It sends
+// IDi, the certificate chain, a CERTREQ, and the signed AUTH, then verifies the
+// server's certificate and AUTH from the response.
+func (c *Client) authCert() error {
+	idBody := idPayloadBody(c.cfg.LocalID)
+	octets := AuthOctets(c.suite.PRF, c.saInitReq, c.nr, c.keys.SKpi, idBody)
+	method, authData, err := signAuth(c.certCred, octets, c.peerSigHashes)
+	if err != nil {
+		return err
+	}
+
+	inner, childOutSPI := c.buildCertAuthInner(idBody, method, authData)
+	c.sendMsgID = 1
+	pkt, err := c.seal(payload.IKE_AUTH, 1, inner.FirstType(), inner.Bytes())
+	if err != nil {
+		return err
+	}
+	if err := c.writeIKE(pkt); err != nil {
+		return err
+	}
+
+	inners, err := c.recvInners()
+	if err != nil {
+		return err
+	}
+	c.sendMsgID = 2
+	if err := c.verifyServerCertAuth(inners); err != nil {
+		return err
+	}
+	return c.applyAuthResult(inners, childOutSPI)
+}
+
+// buildCertAuthInner assembles the certificate IKE_AUTH inner payloads: IDi, the
+// certificate chain (leaf first), a CERTREQ, the signed AUTH, then the same CP /
+// Child SA / TS / MOBIKE payloads the PSK path sends.
+func (c *Client) buildCertAuthInner(idBody []byte, method payload.AuthMethod, authData []byte) (*payload.Builder, uint32) {
+	childOutSPI := newChildSPI()
+	tsAll := payload.TSPayload{Selectors: []payload.TrafficSelector{allTrafficV4()}}
+	cpReq := payload.CPPayload{Type: payload.CFGRequest, Attrs: []payload.CFGAttr{
+		{Type: payload.CFGInternalIP4Address},
+		{Type: payload.CFGInternalIP4Netmask},
+		{Type: payload.CFGInternalIP4DNS},
+	}}
+
+	b := payload.NewBuilder()
+	b.Add(payload.TypeIDi, false, idBody)
+	for _, der := range c.certCred.chain {
+		b.Add(payload.TypeCERT, false, payload.MarshalCert(payload.CertPayload{
+			Encoding: payload.CertX509Signature, Data: der,
+		}))
+	}
+	// Empty CERTREQ CA field: "send a certificate from any CA you trust".
+	b.Add(payload.TypeCERTREQ, false, payload.MarshalCertReq(payload.CertReqPayload{
+		Encoding: payload.CertX509Signature,
+	}))
+	b.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{Method: method, Data: authData}))
+	b.Add(payload.TypeCP, false, payload.MarshalCP(cpReq))
+	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{DefaultESPProposal(u32BE(childOutSPI))}}))
+	b.Add(payload.TypeTSi, false, payload.MarshalTS(tsAll))
+	b.Add(payload.TypeTSr, false, payload.MarshalTS(tsAll))
+	addMobikeSupported(b)
+	return b, childOutSPI
+}
+
+// verifyServerCertAuth verifies the responder's IDr, certificate chain and AUTH
+// signature in a certificate-authenticated IKE_AUTH response.
+func (c *Client) verifyServerCertAuth(inners []payload.RawPayload) error {
+	idrPay := findInner(inners, payload.TypeIDr)
+	authPay := findInner(inners, payload.TypeAUTH)
+	if idrPay == nil || authPay == nil {
+		return fmt.Errorf("ike: cert response missing IDr/AUTH")
+	}
+	idr, err := payload.ParseID(idrPay.Body)
+	if err != nil {
+		return err
+	}
+	if c.cfg.RemoteID != nil {
+		if idr.Type != c.cfg.RemoteID.Type || string(idr.Data) != string(c.cfg.RemoteID.Data) {
+			return fmt.Errorf("ike: server identity mismatch")
+		}
+	}
+
+	certs := findAllInner(inners, payload.TypeCERT)
+	if len(certs) == 0 {
+		return fmt.Errorf("ike: server sent no certificate")
+	}
+	leafDER, intermediates, perr := parseCertChain(certs)
+	if perr != nil {
+		return perr
+	}
+	roots := c.caRoots
+	if roots == nil {
+		sys, serr := x509.SystemCertPool()
+		if serr != nil {
+			return fmt.Errorf("ike: no CA roots configured and system pool unavailable: %w", serr)
+		}
+		roots = sys
+	}
+	leaf, err := verifyPeerCertChain(leafDER, intermediates, roots)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrAuthFailed, err)
+	}
+	if err := certMatchesID(leaf, idr); err != nil {
+		return fmt.Errorf("%w: %v", ErrAuthFailed, err)
+	}
+
+	auth, err := payload.ParseAuth(authPay.Body)
+	if err != nil {
+		return err
+	}
+	idrBody := idPayloadBody(Identity{Type: idr.Type, Data: idr.Data})
+	octets := AuthOctets(c.suite.PRF, c.saInitResp, c.ni, c.keys.SKpr, idrBody)
+	if err := verifyAuth(leaf.PublicKey, auth.Method, octets, auth.Data); err != nil {
+		return fmt.Errorf("%w: %v", ErrAuthFailed, err)
+	}
+	c.serverIDBody = idrBody
+	return nil
 }
 
 // --- IKE_AUTH (EAP-MSCHAPv2) ---
@@ -528,7 +696,14 @@ func (c *Client) finishAuth(inners []payload.RawPayload, childOutSPI uint32, aut
 	if err := c.verifyServerAuth(inners, authKey, eapMSK); err != nil {
 		return err
 	}
+	return c.applyAuthResult(inners, childOutSPI)
+}
 
+// applyAuthResult captures the negotiated configuration from a verified IKE_AUTH
+// response: MOBIKE confirmation, the CP address assignment, and the Child SA. It
+// runs after the server's AUTH has been checked by whichever method was used
+// (PSK, EAP-MSK or certificate).
+func (c *Client) applyAuthResult(inners []payload.RawPayload, childOutSPI uint32) error {
 	// MOBIKE is enabled only if the server confirmed it (RFC 4555 3.1).
 	c.mobike = findMobikeSupported(inners)
 

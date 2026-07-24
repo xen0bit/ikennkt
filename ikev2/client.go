@@ -20,11 +20,14 @@ package ikev2
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -57,6 +60,14 @@ type Config struct {
 	// EAP-MSCHAPv2. The server still authenticates itself with the PSK.
 	EAPUser     string
 	EAPPassword string
+
+	// CertFile/KeyFile, if set, authenticate the client with an X.509
+	// certificate (RFC 7427 digital signature) instead of the PSK. CAFile is the
+	// PEM bundle used to verify the server's certificate; empty uses the host's
+	// system roots.
+	CertFile string
+	KeyFile  string
+	CAFile   string
 
 	// TUNName is the desired TUN interface name; empty lets the kernel pick.
 	TUNName string
@@ -102,6 +113,9 @@ const (
 	OptTUNName  = "tun"       // desired TUN interface name (optional)
 	OptRekey    = "rekey"     // Child SA rekey interval in seconds (optional)
 	OptIKERekey = "ike-rekey" // IKE SA rekey interval in seconds (optional)
+	OptCert     = "cert"      // client certificate PEM path (enables certificate auth)
+	OptKey      = "key"       // client private-key PEM path
+	OptCA       = "ca"        // CA bundle PEM path to verify the server (optional)
 )
 
 // parseOptions turns string-keyed options into a Dialer. It is what the registry
@@ -115,6 +129,9 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		EAPUser:     opts[OptUser],
 		EAPPassword: opts[OptPassword],
 		TUNName:     opts[OptTUNName],
+		CertFile:    opts[OptCert],
+		KeyFile:     opts[OptKey],
+		CAFile:      opts[OptCA],
 	}
 	if p := opts[OptPort]; p != "" {
 		n, err := strconv.Atoi(p)
@@ -147,10 +164,14 @@ func (cfg Config) validate() error {
 	switch {
 	case cfg.Server == "":
 		return fmt.Errorf("%s is required", OptGateway)
-	case cfg.PSK == "":
-		return fmt.Errorf("%s is required", OptPSK)
 	case cfg.LocalID == "":
 		return fmt.Errorf("%s is required", OptLocalID)
+	case cfg.CertFile != "" && cfg.KeyFile == "":
+		return fmt.Errorf("%s requires %s", OptCert, OptKey)
+	case cfg.CertFile == "" && cfg.PSK == "":
+		// Without a certificate the PSK is what authenticates the server (and the
+		// client, unless EAP is used).
+		return fmt.Errorf("%s is required unless %s is set", OptPSK, OptCert)
 	}
 	return nil
 }
@@ -189,6 +210,20 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	if cfg.ServerID != "" {
 		id := parseIdentity(cfg.ServerID)
 		ikeCfg.RemoteID = &id
+	}
+	if cfg.CertFile != "" {
+		cert, err := loadTLSCert(cfg.CertFile, cfg.KeyFile)
+		if err != nil {
+			return nil, client.Result{}, fmt.Errorf("ikev2: client certificate: %w", err)
+		}
+		ikeCfg.ClientCert = cert
+		if cfg.CAFile != "" {
+			pool, err := loadCAPool(cfg.CAFile)
+			if err != nil {
+				return nil, client.Result{}, fmt.Errorf("ikev2: CA bundle: %w", err)
+			}
+			ikeCfg.CARoots = pool
+		}
 	}
 
 	// 1. Handshake, honoring ctx cancellation. Connect has its own read
@@ -647,6 +682,28 @@ func serverGateway(res *ike.ClientResult, host string) net.IP {
 		}
 	}
 	return nil
+}
+
+// loadTLSCert loads a PEM certificate chain and private key from files.
+func loadTLSCert(certFile, keyFile string) (*tls.Certificate, error) {
+	c, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// loadCAPool loads a PEM CA bundle into a certificate pool.
+func loadCAPool(caFile string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("no certificates found in %s", caFile)
+	}
+	return pool, nil
 }
 
 // parseIdentity interprets an identity string as an IP literal or an FQDN.

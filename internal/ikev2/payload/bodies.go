@@ -112,6 +112,64 @@ func ParseID(buf []byte) (IDPayload, error) {
 	}, nil
 }
 
+// --- Certificate (RFC 7296 3.6) ---
+
+// CertPayload is a decoded CERT payload: an encoding byte plus the certificate
+// data (a DER-encoded X.509 certificate for CertX509Signature).
+type CertPayload struct {
+	Encoding CertEncoding
+	Data     []byte
+}
+
+// MarshalCert encodes a CERT payload body.
+func MarshalCert(c CertPayload) []byte {
+	out := make([]byte, 1+len(c.Data))
+	out[0] = byte(c.Encoding)
+	copy(out[1:], c.Data)
+	return out
+}
+
+// ParseCert decodes a CERT payload body.
+func ParseCert(buf []byte) (CertPayload, error) {
+	if len(buf) < 1 {
+		return CertPayload{}, ErrTruncated
+	}
+	return CertPayload{
+		Encoding: CertEncoding(buf[0]),
+		Data:     append([]byte(nil), buf[1:]...),
+	}, nil
+}
+
+// --- Certificate Request (RFC 7296 3.7) ---
+
+// CertReqPayload is a decoded CERTREQ payload: an encoding byte plus the
+// Certification Authority field. For CertX509Signature that field is a
+// concatenation of 20-octet SHA-1 hashes of trusted CA public keys (empty means
+// "any trusted CA").
+type CertReqPayload struct {
+	Encoding CertEncoding
+	CAs      []byte
+}
+
+// MarshalCertReq encodes a CERTREQ payload body.
+func MarshalCertReq(c CertReqPayload) []byte {
+	out := make([]byte, 1+len(c.CAs))
+	out[0] = byte(c.Encoding)
+	copy(out[1:], c.CAs)
+	return out
+}
+
+// ParseCertReq decodes a CERTREQ payload body.
+func ParseCertReq(buf []byte) (CertReqPayload, error) {
+	if len(buf) < 1 {
+		return CertReqPayload{}, ErrTruncated
+	}
+	return CertReqPayload{
+		Encoding: CertEncoding(buf[0]),
+		CAs:      append([]byte(nil), buf[1:]...),
+	}, nil
+}
+
 // --- Authentication (RFC 7296 3.8) ---
 
 // AuthPayload is a decoded AUTH payload.

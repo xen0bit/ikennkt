@@ -13,6 +13,7 @@ auth), and produces [`esp`](../esp) SAs for the data path.
 - [RFC 7296 §3.15](https://www.rfc-editor.org/rfc/rfc7296#section-3.15) — Configuration payload (address assignment).
 - [RFC 4555](https://www.rfc-editor.org/rfc/rfc4555) — MOBIKE (address agility for a roaming peer).
 - [RFC 7383](https://www.rfc-editor.org/rfc/rfc7383) — IKEv2 fragmentation (inbound SKF reassembly).
+- [RFC 7427](https://www.rfc-editor.org/rfc/rfc7427) — IKEv2 signature authentication (the Digital Signature AUTH method 14).
 
 ## Handshake and SA lifecycle
 
@@ -55,7 +56,7 @@ stateDiagram-v2
 ## API surface
 
 - **Session drivers** — `Client`/`NewClient(ClientConfig)` → `ClientResult`;
-  `Server`/`NewServer(Config)`. Both speak both auth methods.
+  `Server`/`NewServer(Config)`. Both speak all three auth methods (PSK, EAP, certificate).
 - **Key schedule** — `DeriveIKEKeys(...) (skeyseed, SAKeys)`,
   `DeriveChildKeys(...)`, `AuthOctets(...)`, `PSKAuth(...)`. `SAKeys` holds
   `SK_d/ai/ar/ei/er/pi/pr`.
@@ -75,6 +76,22 @@ stateDiagram-v2
 - **PSK vs EAP diverge only after SA_INIT.** EAP adds round trips carried by
   [`eap`](../eap); the initiator's final AUTH in the EAP flow is keyed from the
   EAP MSK, not the PSK.
+- **Certificate auth signs the same octets PSK MACs.** With a certificate
+  (`ClientConfig.ClientCert` / `Config.ServerCert`, both `*tls.Certificate`) the
+  AUTH payload is a signature over the RFC 7296 §2.15 signed octets rather than
+  a `prf`-based MAC. The preferred method is the RFC 7427 Digital Signature
+  (method 14): the AUTH payload carries a one-octet ASN.1 length, a DER
+  `AlgorithmIdentifier` (e.g. `ecdsa-with-SHA256`), then the signature; both ends
+  exchange `SIGNATURE_HASH_ALGORITHMS` in `IKE_SA_INIT` to agree on the hash. A
+  peer that offers no `SIGNATURE_HASH_ALGORITHMS` gets the legacy RSA method (1).
+  Each side presents its chain in `CERT` payloads (prompted by a `CERTREQ`),
+  verifies the peer's chain to a configured CA (`CARoots` / `ClientCAs`), and
+  binds the certificate to the peer's `IDi`/`IDr` (SAN or DER-DN) so a trusted
+  certificate cannot impersonate a different identity. `certauth.go` holds the
+  signature schemes and trust logic; the wire flow is a single round trip like
+  PSK. This is what interoperates with strongSwan `pubkey` auth and native
+  certificate clients. The classic per-curve ECDSA methods (9/10/11) and RSA-PSS
+  are not produced.
 - **NAT-T floats to UDP/4500 and forces UDP-encap of ESP.** The non-ESP marker
   disambiguates IKE from ESP on the shared 4500 socket; the [`esp`](../esp) path
   assumes this encapsulation.

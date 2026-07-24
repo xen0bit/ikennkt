@@ -35,7 +35,10 @@ type interopRow struct {
 var interopMatrix = []interopRow{
 	{
 		Protocol: "IKEv2",
-		Client:   interopCell{Tests: []string{"TestInteropVeepinClientStrongswanServer"}, Label: "strongSwan"},
+		Client: interopCell{Tests: []string{
+			"TestInteropVeepinClientStrongswanServer",
+			"TestInteropVeepinClientStrongswanServerCert",
+		}, Label: "strongSwan (PSK + pubkey)"},
 		Server: interopCell{Tests: []string{
 			"TestInteropStrongswanClientVeepinServer",
 			"TestInteropStrongswanClientVeepinServerFragmented",

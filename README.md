@@ -41,7 +41,7 @@ wire detail, caveats and API surface.
 
 | Protocol | Authentication | Data path | Verified against | Docs |
 |----------|----------------|-----------|------------------|------|
-| **IKEv2/ESP** | PSK, EAP-MSCHAPv2 | ESP-in-UDP, RFC 4303 (NAT-T, CP address assignment) | strongSwan | [ikev2](internal/ikev2/ike/README.md) |
+| **IKEv2/ESP** | PSK, EAP-MSCHAPv2, X.509 certificate (RFC 7427) | ESP-in-UDP, RFC 4303 (NAT-T, CP address assignment) | strongSwan | [ikev2](internal/ikev2/ike/README.md) |
 | **WireGuard** | Noise_IKpsk2 static keys | ChaCha20-Poly1305, cryptokey routing, client rekey | wireguard-go | [wireguard](internal/wireguard/) |
 | **OpenVPN** | mutual TLS certificates | AES-256-GCM / -CBC; plain, `tls-auth`, `tls-crypt` | `openvpn` | [openvpn](internal/openvpn/) |
 | **SSTP** | MS-CHAPv2 over PPP | PPP/IPCP over TLS, SHA-256 crypto binding | SoftEther, `sstpc`/pppd | [sstp](internal/sstp/wire/README.md) |
@@ -522,7 +522,12 @@ each a localized extension point, not a structural rework:
 - **Client and server, Linux data path.** Both roles are implemented, but the TUN
   data path and route installation are Linux-only (other platforms compile;
   `OpenTUN` and routing return errors). The IKE/handshake code is portable.
-- **PSK and EAP-MSCHAPv2 auth.** No certificate-based auth; EAP is MSCHAPv2 only
+- **PSK, EAP-MSCHAPv2 and X.509 certificate auth.** Certificate authentication
+  is the RFC 7427 Digital Signature (AUTH method 14) with RSA or ECDSA, plus the
+  legacy RSA method (1) for a peer that does not offer RFC 7427 — client and
+  server, mutually verified against a CA and bound to the peer's IKE identity;
+  it interoperates with strongSwan's `pubkey` auth. The classic per-curve ECDSA
+  methods (9/10/11) and RSA-PSS are not produced, and EAP remains MSCHAPv2 only
   (TLS/PEAP/GTC out of scope). MSCHAPv2 is dated and needs recoverable passwords
   server-side, but it is the interoperable username/password choice.
 - **Child SA rekey is fresh-only.** `CREATE_CHILD_SA` treats rekey as a fresh

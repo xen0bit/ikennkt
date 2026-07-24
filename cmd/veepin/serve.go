@@ -106,6 +106,9 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			dns      = fs.String("dns", "1.1.1.1,8.8.8.8", "comma-separated DNS servers pushed to clients")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks, e.g. tun0)")
 			eapUsers = fs.String("eap-users", "", "path to a username:password file enabling EAP-MSCHAPv2 auth (optional)")
+			cert     = fs.String("cert", "", "server certificate PEM (enables certificate auth instead of PSK)")
+			key      = fs.String("key", "", "server private-key PEM (with -cert)")
+			clientCA = fs.String("client-ca", "", "CA bundle PEM enabling client certificate auth (optional)")
 		)
 		return func() map[string]string {
 			return map[string]string{
@@ -117,6 +120,9 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				ikev2.OptServerDNS:      *dns,
 				ikev2.OptServerTUN:      *tun,
 				ikev2.OptServerEAPUsers: *eapUsers,
+				ikev2.OptServerCert:     *cert,
+				ikev2.OptServerKey:      *key,
+				ikev2.OptServerClientCA: *clientCA,
 			}
 		}, nil
 	case "wireguard":
