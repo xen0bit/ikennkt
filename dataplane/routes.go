@@ -49,20 +49,39 @@ func (t *routeTable) insert(p netip.Prefix, v Tunnel) {
 // remove drops p's entry. Interior nodes are left in place: route sets are small
 // and churn with SA lifetime, not per packet, so pruning would buy nothing.
 func (t *routeTable) remove(p netip.Prefix) {
+	if n := t.node(p); n != nil {
+		n.val, n.set = nil, false
+	}
+}
+
+// removeOwned drops p's entry only while owner still holds it.
+//
+// Make-before-break SA replacement — install the new tunnel, then retire the old
+// — has both tunnels claiming the same prefix, and insert has already handed it
+// to the new one. An unconditional remove on the way past would tear out the
+// live route and black-hole every outbound packet from then on.
+func (t *routeTable) removeOwned(p netip.Prefix, owner Tunnel) {
+	if n := t.node(p); n != nil && n.set && n.val == owner {
+		n.val, n.set = nil, false
+	}
+}
+
+// node walks to p's node, or nil when the trie has no branch that far.
+func (t *routeTable) node(p netip.Prefix) *routeNode {
 	p = p.Masked()
 	if !p.Addr().Is4() || t.root == nil {
-		return
+		return nil
 	}
 	n := t.root
 	bits := addrBits(p.Addr())
 	for i := 0; i < p.Bits(); i++ {
 		b := (bits >> (31 - i)) & 1
 		if n.child[b] == nil {
-			return
+			return nil
 		}
 		n = n.child[b]
 	}
-	n.val, n.set = nil, false
+	return n
 }
 
 // lookup returns the tunnel whose prefix matches ip most specifically, or nil.

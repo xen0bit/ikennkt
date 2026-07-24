@@ -40,7 +40,10 @@ var interopMatrix = []interopRow{
 			"TestInteropStrongswanClientVeepinServer",
 			"TestInteropStrongswanClientVeepinServerFragmented",
 		}, Label: "strongSwan (+ RFC 7383 frag)"},
-		Self: interopCell{Tests: []string{"TestInteropSelf"}},
+		Self: interopCell{Tests: []string{
+			"TestInteropSelf",
+			"TestInteropIKEv2ChildRekey",
+		}},
 	},
 	{
 		Protocol: "WireGuard",

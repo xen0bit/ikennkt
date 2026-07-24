@@ -61,9 +61,20 @@ type Config struct {
 	// TUNName is the desired TUN interface name; empty lets the kernel pick.
 	TUNName string
 
+	// RekeyInterval is the Child SA soft lifetime: the client proactively
+	// rekeys the ESP SA (a CREATE_CHILD_SA exchange, new keys, old SA deleted)
+	// this often, so a long-lived tunnel never lets its data SA expire. Zero
+	// uses defaultRekeyInterval; negative disables proactive rekey.
+	RekeyInterval time.Duration
+
 	// Logger receives progress logs; nil discards them.
 	Logger *log.Logger
 }
+
+// defaultRekeyInterval is the Child SA soft lifetime when Config.RekeyInterval
+// is zero. IKEv2 does not negotiate lifetimes (RFC 7296), so this is local
+// policy; one hour is a conservative default well under common byte ceilings.
+const defaultRekeyInterval = time.Hour
 
 // Option keys accepted by client.Dial(ctx, "ikev2", opts). They match the
 // NetworkManager plugin's connection settings, which is why the parsed names are
@@ -77,6 +88,7 @@ const (
 	OptUser     = "user"      // EAP-MSCHAPv2 username (optional)
 	OptPassword = "password"  // EAP-MSCHAPv2 password (optional)
 	OptTUNName  = "tun"       // desired TUN interface name (optional)
+	OptRekey    = "rekey"     // Child SA rekey interval in seconds (optional)
 )
 
 // parseOptions turns string-keyed options into a Dialer. It is what the registry
@@ -97,6 +109,13 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 			return nil, fmt.Errorf("bad %s %q: %w", OptPort, p, err)
 		}
 		cfg.Port = n
+	}
+	if r := opts[OptRekey]; r != "" {
+		n, err := strconv.Atoi(r)
+		if err != nil {
+			return nil, fmt.Errorf("bad %s %q: %w", OptRekey, r, err)
+		}
+		cfg.RekeyInterval = time.Duration(n) * time.Second
 	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -194,11 +213,14 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	dataConn := c.DataConn()
 
 	s := &session{
-		ike:    c,
-		tun:    tun,
-		logger: logger,
-		done:   make(chan struct{}),
-		stopKA: make(chan struct{}),
+		ike:        c,
+		tun:        tun,
+		logger:     logger,
+		tunnel:     tunnel,
+		childInSPI: res.InboundSPI,
+		done:       make(chan struct{}),
+		stopKA:     make(chan struct{}),
+		stopRekey:  make(chan struct{}),
 	}
 	// The ESP socket is held behind an atomic so MOBIKE Roam can swap it under
 	// the running data path (see session.Roam).
@@ -310,6 +332,31 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		}
 	}()
 
+	// Proactive Child SA rekey: replace the ESP SA before its soft lifetime so a
+	// long-lived tunnel never lets its data SA expire.
+	rekeyEvery := cfg.RekeyInterval
+	if rekeyEvery == 0 {
+		rekeyEvery = defaultRekeyInterval
+	}
+	if rekeyEvery > 0 {
+		go func() {
+			t := time.NewTicker(rekeyEvery)
+			defer t.Stop()
+			for {
+				select {
+				case <-s.stopRekey:
+					return
+				case <-t.C:
+					if err := s.rekeyChild(); err != nil {
+						// A failed rekey leaves the current SA in place; the next
+						// tick retries. Liveness (Probe) catches a truly dead peer.
+						logger.Printf("ikev2: Child SA rekey failed: %v", err)
+					}
+				}
+			}
+		}()
+	}
+
 	out := client.Result{
 		TUNName:    tun.Name(),
 		AssignedIP: res.AssignedIP,
@@ -341,10 +388,18 @@ type session struct {
 	roaming atomic.Bool // a socket swap is in progress
 	closing atomic.Bool // Close was called; read-loop errors are terminal
 
+	// rekeyMu guards the Child SA data-path swap: tunnel and childInSPI track the
+	// currently-installed ESP SA so a rekey can retire exactly the SA it
+	// replaced. Only the rekey goroutine writes them, under the lock.
+	rekeyMu    sync.Mutex
+	tunnel     dataplane.Tunnel
+	childInSPI uint32
+
 	closeOnce sync.Once
 	closeErr  error
 	done      chan struct{} // closed when the inbound loop exits (i.e. on Close)
 	stopKA    chan struct{} // stops the NAT-keepalive goroutine
+	stopRekey chan struct{} // stops the proactive-rekey goroutine
 }
 
 // Roam relocates the tunnel to a fresh local address after the client's network
@@ -383,6 +438,54 @@ func (s *session) Roam() error {
 // runs a DPD exchange: recent inbound ESP is itself proof the peer is alive.
 const ikeLivenessIdle = 20 * time.Second
 
+// rekeyChild runs one Child SA rekey and swaps the data path onto the fresh SA
+// without dropping traffic: the new SA is installed (its inbound SPI registered
+// and the outbound route repointed) before the old one is torn down, so there
+// is no window where packets have no SA. It serializes with itself via rekeyMu.
+func (s *session) rekeyChild() error {
+	s.rekeyMu.Lock()
+	defer s.rekeyMu.Unlock()
+	if s.closing.Load() {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	newRes, oldInSPI, err := s.ike.RekeyChild(ctx)
+	if err != nil {
+		return err
+	}
+	newTunnel, err := newRes.BuildTunnel()
+	if err != nil {
+		return fmt.Errorf("build rekeyed tunnel: %w", err)
+	}
+	// Inherit the live peer endpoint (MOBIKE roam may have moved it).
+	if u, ok := newTunnel.(interface{ SetPeerAddr(*net.UDPAddr) }); ok {
+		u.SetPeerAddr(s.ike.CurrentServerAddr())
+	}
+
+	// Install the new SA first: AddTunnel registers the new inbound SPI and
+	// repoints the (shared) outbound route to the new tunnel, so outbound
+	// immediately uses the new keys the responder just set up. The old inbound
+	// SPI stays registered until we retire it below, so ESP already in flight
+	// under the old SA still decrypts.
+	oldTunnel := s.tunnel
+	s.pump.AddTunnel(newTunnel)
+	s.tunnel = newTunnel
+	s.childInSPI = newRes.InboundSPI
+
+	// Tell the peer to delete the old SA, then retire it here. RemoveTunnel
+	// unregisters by identity — both tunnels claim the same 0.0.0.0/0 route, and
+	// the successor already owns it — so this drops only the old inbound SPI.
+	if err := s.ike.DeleteChildSA(ctx, oldInSPI); err != nil {
+		s.logger.Printf("ikev2: delete of rekeyed-out Child SA failed: %v", err)
+	}
+	s.pump.RemoveTunnel(oldTunnel)
+	s.logger.Printf("ikev2: Child SA rekeyed (in=%#x out=%#x)", newRes.InboundSPI, newRes.OutboundSPI)
+	return nil
+}
+
 // Probe implements client.Prober. Recent inbound ESP proves the peer is alive,
 // so while traffic is flowing the probe does nothing. Only after a stretch of
 // silence does it run one IKEv2 dead-peer-detection exchange (an empty
@@ -414,6 +517,7 @@ func (s *session) Close() error {
 	s.closeOnce.Do(func() {
 		s.closing.Store(true)
 		close(s.stopKA)
+		close(s.stopRekey)
 		if s.pump != nil {
 			s.pump.Close()
 		}

@@ -344,3 +344,72 @@ func TestPumpDemuxIsPluggable(t *testing.T) {
 	})
 	espPump.HandleInbound(data, nil) // bytes[0:4] are 04 00 00 00, not the key
 }
+
+// TestPumpMakeBeforeBreakSwap is the rekey swap the IKEv2 Child SA lifecycle
+// performs: the replacement tunnel is installed *before* the old one is deleted,
+// and both claim the very same prefix (the peer's assigned /32 on a server,
+// 0.0.0.0/0 on a client). Retiring the old tunnel must leave the successor's
+// route intact — an unconditional route removal here black-holes every outbound
+// packet from the swap onward, which is exactly what a live rekey looked like.
+func TestPumpMakeBeforeBreakSwap(t *testing.T) {
+	client := net.IPv4(10, 10, 10, 2)
+	route := []netip.Prefix{netip.MustParsePrefix("10.10.10.2/32")}
+
+	var sent [][]byte
+	tun := newFakeTUN()
+	pump := NewPump(tun, func(pkt []byte, _ *net.UDPAddr) {
+		sent = append(sent, append([]byte(nil), pkt...))
+	}, SPIDemux, nil)
+
+	newTunnel := func(spi uint32, tag byte) *fakeTunnel {
+		return &fakeTunnel{
+			inSPI:  spi,
+			routes: route,
+			peer:   &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 4500},
+			enc: func(p []byte) ([]byte, error) {
+				return append([]byte{tag}, p...), nil
+			},
+			dec: func([]byte) ([]byte, error) { return []byte{0x45}, nil },
+		}
+	}
+
+	oldT := newTunnel(0x1111, 'A')
+	pump.AddTunnel(oldT)
+	pump.routeOutbound(makeIPv4(client, []byte("before")))
+
+	// The rekey: install the successor, then retire the predecessor.
+	newT := newTunnel(0x2222, 'B')
+	pump.AddTunnel(newT)
+	pump.RemoveTunnel(oldT)
+
+	pump.routeOutbound(makeIPv4(client, []byte("after")))
+
+	if len(sent) != 2 {
+		t.Fatalf("outbound packets sent = %d, want 2 (the post-swap packet was dropped)", len(sent))
+	}
+	if sent[0][0] != 'A' {
+		t.Errorf("pre-swap packet went to tunnel %q, want the old one", sent[0][0])
+	}
+	if sent[1][0] != 'B' {
+		t.Errorf("post-swap packet went to tunnel %q, want the new one", sent[1][0])
+	}
+
+	// The old tunnel's inbound key is gone; the new one's still routes.
+	deliver := func(key uint32) bool {
+		pkt := make([]byte, 40)
+		binary.BigEndian.PutUint32(pkt[:4], key)
+		pump.HandleInbound(pkt, nil)
+		select {
+		case <-tun.writeSig:
+			return true
+		case <-time.After(150 * time.Millisecond):
+			return false
+		}
+	}
+	if deliver(0x1111) {
+		t.Error("retired tunnel still accepts inbound packets")
+	}
+	if !deliver(0x2222) {
+		t.Error("successor tunnel stopped accepting inbound packets after the swap")
+	}
+}

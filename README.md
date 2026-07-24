@@ -540,9 +540,13 @@ each a localized extension point, not a structural rework:
   rekey; pump-based protocols expose an authenticated-idle signal
   (`dataplane.Pump.IdleFor`), which TOY uses. Reliable-transport protocols
   (SSTP, SSH, AnyConnect, MASQUE, Fortinet) surface a dead peer through the
-  transport's own read failure, so they need no probe. What remains is proactive
-  **SA rekey before expiry** for IKEv2's IKE/Child SAs, so a very long-lived
-  IKEv2 session still eventually reconnects rather than rekeying in place.
+  transport's own read failure, so they need no probe. IKEv2 also rekeys its
+  **Child SA** proactively before the soft lifetime — a `CREATE_CHILD_SA`
+  exchange whose fresh keys are swapped into the data path before the old SA is
+  deleted, so a long-lived tunnel never lets its ESP SA expire. What remains is
+  rekeying the **IKE SA** itself (the control SA); its lifetimes are long, so in
+  practice a very long-lived session re-dials the control channel rather than
+  rekeying it in place.
 - **IPv4 tunneling; single IKE SA per Child.** IPv6 inner traffic is not
   forwarded; sufficient for road-warrior clients, not a site-to-site multi-SA
   gateway.

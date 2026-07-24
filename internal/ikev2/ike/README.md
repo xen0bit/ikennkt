@@ -105,3 +105,14 @@ stateDiagram-v2
   and out-of-order fragments are handled. The `SK`/`SKF` decrypt and RFC 7296
   de-padding are shared (`openSK`/`stripRFC7296Pad`), so a fragment opens exactly
   like a whole message minus the reassembly.
+- **Client liveness and Child SA rekey ride the post-handshake control channel.**
+  Once the data path owns the socket, the client can no longer read IKE responses
+  inline, so `Attach` switches it to a delivered-inbox mode and the data-path
+  loop feeds received IKE datagrams in via `Deliver`. `SendDPD` (an empty
+  `INFORMATIONAL` the peer must answer) is the liveness probe the `client`
+  monitor drives; `RekeyChild` runs a `CREATE_CHILD_SA` before the ESP SA's soft
+  lifetime, deriving fresh keys the same way the handshake does and returning them
+  as a `ClientResult` the session swaps into the data path (new SA installed
+  before the old is deleted, so no packet is ever without an SA). `exchMu`
+  serializes DPD, rekey and MOBIKE roam so their message IDs never interleave.
+  Rekeying the IKE SA itself is not yet implemented.
