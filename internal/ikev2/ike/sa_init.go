@@ -114,6 +114,10 @@ func (s *Server) handleIKESAInit(pkt []byte, hdr payload.Header, remote *net.UDP
 	// messages. We never fragment our own output.
 	newSA.fragEnabled = findFragSupported(msg.Payloads)
 
+	// RFC 7427 signature hashes the initiator will accept, for a certificate
+	// AUTH the server may sign in IKE_AUTH.
+	newSA.peerSigHashes = findSigHashes(msg.Payloads)
+
 	_, keys := DeriveIKEKeys(
 		suite.PRF, shared, newSA.Ni, newSA.Nr,
 		newSA.InitiatorSPI, newSA.ResponderSPI,
@@ -134,6 +138,16 @@ func (s *Server) handleIKESAInit(pkt []byte, hdr payload.Header, remote *net.UDP
 	s.addNATDetection(b, newSA.InitiatorSPI, newSA.ResponderSPI, remote, on4500)
 	if newSA.fragEnabled {
 		addFragSupported(b)
+	}
+	// When the server can do certificate auth, advertise the RFC 7427 signature
+	// hashes and ask for a certificate (an empty CERTREQ = "any CA I trust"), so
+	// a certificate-capable initiator sends its chain and signs a Digital
+	// Signature. Harmless to a PSK/EAP client, which ignores both.
+	if s.serverCred != nil || s.cfg.ClientCAs != nil {
+		addSigHashNotify(b)
+		b.Add(payload.TypeCERTREQ, false, payload.MarshalCertReq(payload.CertReqPayload{
+			Encoding: payload.CertX509Signature,
+		}))
 	}
 
 	chain := b.Bytes()

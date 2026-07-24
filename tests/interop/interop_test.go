@@ -52,6 +52,15 @@ func TestInteropStrongswanClientVeepinServer(t *testing.T) {
 	runInteropBench(t, "compose.server-ss.yml", "strongswan-client", "veepin-server", "10.10.10.1")
 }
 
+// TestInteropVeepinClientStrongswanServerCert is Direction A with certificate
+// authentication: the veepin client authenticates to a strongSwan responder with
+// an ECDSA certificate (no PSK), each verifying the other's chain and RFC 7427
+// Digital Signature (AUTH method 14). A successful cross-tunnel ping proves our
+// CERT/CERTREQ payloads and method-14 signing interoperate with strongSwan.
+func TestInteropVeepinClientStrongswanServerCert(t *testing.T) {
+	runInterop(t, "compose.client-ss-cert.yml", "veepin-client", "10.20.30.254")
+}
+
 // TestInteropStrongswanClientVeepinServerFragmented is Direction B with IKE
 // fragmentation forced (RFC 7383): the strongSwan initiator splits its IKE_AUTH
 // into SKF fragments (fragmentation=force + a small fragment_size), which the

@@ -126,6 +126,9 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 			rekey    = fs.Int("rekey", 0, "Child SA rekey interval in seconds (0 = default 3600)")
 			ikeRekey = fs.Int("ike-rekey", 0, "IKE SA rekey interval in seconds (0 = default 14400)")
+			cert     = fs.String("cert", "", "client certificate PEM (enables certificate auth instead of PSK)")
+			key      = fs.String("key", "", "client private-key PEM (with -cert)")
+			ca       = fs.String("ca", "", "CA bundle PEM to verify the server (optional; default system roots)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -136,6 +139,9 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 				ikev2.OptUser:     *user,
 				ikev2.OptPassword: *pass,
 				ikev2.OptTUNName:  *tun,
+				ikev2.OptCert:     *cert,
+				ikev2.OptKey:      *key,
+				ikev2.OptCA:       *ca,
 			}
 			if *port != 0 {
 				opts[ikev2.OptPort] = fmt.Sprint(*port)

@@ -1,6 +1,8 @@
 package ikev2
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"log"
@@ -46,6 +48,14 @@ type ServerConfig struct {
 	// authenticates itself with the PSK.
 	EAPUsers string
 
+	// CertFile/KeyFile, if set, authenticate the server with an X.509
+	// certificate (RFC 7427 digital signature) instead of the PSK. ClientCAFile
+	// is a PEM bundle enabling client certificate authentication; a client whose
+	// certificate chains to it may authenticate without the PSK.
+	CertFile     string
+	KeyFile      string
+	ClientCAFile string
+
 	// Logger receives progress logs; nil discards them.
 	Logger *log.Logger
 }
@@ -72,14 +82,33 @@ type Server struct {
 // Opening a TUN device requires CAP_NET_ADMIN.
 func NewServer(cfg ServerConfig) (*Server, error) {
 	switch {
-	case cfg.PSK == "":
-		return nil, fmt.Errorf("ikev2: PSK is required")
+	case cfg.PSK == "" && cfg.CertFile == "":
+		return nil, fmt.Errorf("ikev2: a PSK or certificate is required")
 	case cfg.LocalID == "":
 		return nil, fmt.Errorf("ikev2: LocalID is required")
+	case cfg.CertFile != "" && cfg.KeyFile == "":
+		return nil, fmt.Errorf("ikev2: CertFile requires KeyFile")
 	}
 	logger := cfg.Logger
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
+	}
+
+	var serverCert *tls.Certificate
+	if cfg.CertFile != "" {
+		c, err := loadTLSCert(cfg.CertFile, cfg.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("ikev2: server certificate: %w", err)
+		}
+		serverCert = c
+	}
+	var clientCAs *x509.CertPool
+	if cfg.ClientCAFile != "" {
+		pool, err := loadCAPool(cfg.ClientCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("ikev2: client CA bundle: %w", err)
+		}
+		clientCAs = pool
 	}
 	poolCIDR := cfg.Pool
 	if poolCIDR == "" {
@@ -109,13 +138,15 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	srv, err := ike.NewServer(ike.Config{
-		ListenIP: cfg.ListenIP,
-		Port500:  cfg.Port500,
-		Port4500: cfg.Port4500,
-		PSK:      []byte(cfg.PSK),
-		LocalID:  parseIdentity(cfg.LocalID),
-		PublicIP: cfg.PublicIP,
-		Logger:   logger,
+		ListenIP:   cfg.ListenIP,
+		Port500:    cfg.Port500,
+		Port4500:   cfg.Port4500,
+		PSK:        []byte(cfg.PSK),
+		LocalID:    parseIdentity(cfg.LocalID),
+		PublicIP:   cfg.PublicIP,
+		ServerCert: serverCert,
+		ClientCAs:  clientCAs,
+		Logger:     logger,
 		AssignAddr: func() (net.IP, net.IP, []net.IP, error) {
 			ip, aerr := pool.Allocate()
 			if aerr != nil {
@@ -174,6 +205,9 @@ const (
 	OptServerDNS      = "dns"       // comma-separated DNS servers pushed to clients
 	OptServerTUN      = "tun"       // TUN interface name (empty = kernel picks)
 	OptServerEAPUsers = "eap-users" // path to a username:password file enabling EAP-MSCHAPv2
+	OptServerCert     = "cert"      // server certificate PEM (enables certificate auth)
+	OptServerKey      = "key"       // server private-key PEM
+	OptServerClientCA = "client-ca" // CA bundle PEM enabling client certificate auth
 )
 
 func init() { client.RegisterServer("ikev2", parseServerOptions) }
@@ -183,13 +217,16 @@ func init() { client.RegisterServer("ikev2", parseServerOptions) }
 // documents so the registry is usable standalone.
 func parseServerOptions(opts map[string]string) (client.Server, error) {
 	cfg := ServerConfig{
-		ListenIP: opts[OptServerListen],
-		PSK:      opts[OptServerPSK],
-		LocalID:  opts[OptServerIdentity],
-		Pool:     opts[OptServerPool],
-		TUNName:  opts[OptServerTUN],
-		EAPUsers: opts[OptServerEAPUsers],
-		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		ListenIP:     opts[OptServerListen],
+		PSK:          opts[OptServerPSK],
+		LocalID:      opts[OptServerIdentity],
+		Pool:         opts[OptServerPool],
+		TUNName:      opts[OptServerTUN],
+		EAPUsers:     opts[OptServerEAPUsers],
+		CertFile:     opts[OptServerCert],
+		KeyFile:      opts[OptServerKey],
+		ClientCAFile: opts[OptServerClientCA],
+		Logger:       log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
 	}
 	if cfg.ListenIP == "" {
 		cfg.ListenIP = "0.0.0.0"

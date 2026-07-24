@@ -1,6 +1,8 @@
 package ike
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log"
 	"net"
@@ -24,6 +26,15 @@ type Config struct {
 	PSK []byte
 	// LocalID is the identity this server presents in IKE_AUTH.
 	LocalID Identity
+
+	// ServerCert, if set, authenticates the server with an X.509 certificate
+	// (RFC 7427 digital signature) instead of the PSK. It is required to accept
+	// certificate-authenticating clients, and its subject/SANs should match
+	// LocalID so a peer's identity check passes.
+	ServerCert *tls.Certificate
+	// ClientCAs, if set, enables certificate authentication for clients and is
+	// the trust anchor their certificates must chain to.
+	ClientCAs *x509.CertPool
 
 	// EAPCredentials, if non-nil, enables EAP-MSCHAPv2 username/password
 	// authentication. When a client omits the AUTH payload in IKE_AUTH (asking
@@ -82,6 +93,10 @@ type Server struct {
 	gate    *dataplane.Gate
 	cookies *cookieJar
 
+	// serverCred is the certificate credential the server signs its AUTH with
+	// when a client authenticates by certificate (built from cfg.ServerCert).
+	serverCred *certCredential
+
 	mu       sync.RWMutex
 	byRSPI   map[uint64]*IKESA
 	byRemote map[string]*IKESA
@@ -90,11 +105,19 @@ type Server struct {
 
 // NewServer creates a server from cfg.
 func NewServer(cfg Config) (*Server, error) {
-	if len(cfg.PSK) == 0 {
-		return nil, fmt.Errorf("ike: PSK is required")
+	if len(cfg.PSK) == 0 && cfg.ServerCert == nil {
+		return nil, fmt.Errorf("ike: a PSK or ServerCert is required")
 	}
 	if cfg.LocalID.Type == 0 {
 		return nil, fmt.Errorf("ike: LocalID is required")
+	}
+	var serverCred *certCredential
+	if cfg.ServerCert != nil {
+		cred, err := credentialFromTLS(cfg.ServerCert)
+		if err != nil {
+			return nil, fmt.Errorf("ike: server certificate: %w", err)
+		}
+		serverCred = cred
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = log.Default()
@@ -134,12 +157,13 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		cfg:      cfg,
-		log:      cfg.Logger,
-		gate:     dataplane.NewGate(dataplane.AdmissionConfig{}),
-		cookies:  newCookieJar(),
-		byRSPI:   make(map[uint64]*IKESA),
-		byRemote: make(map[string]*IKESA),
+		cfg:        cfg,
+		log:        cfg.Logger,
+		gate:       dataplane.NewGate(dataplane.AdmissionConfig{}),
+		cookies:    newCookieJar(),
+		serverCred: serverCred,
+		byRSPI:     make(map[uint64]*IKESA),
+		byRemote:   make(map[string]*IKESA),
 	}
 	s.tr = &transport{
 		conn500:    dataplane.NewPacketConn(c500),

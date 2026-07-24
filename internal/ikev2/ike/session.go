@@ -135,6 +135,11 @@ type IKESA struct {
 	fragEnabled bool
 	fragReasm   fragReassembler
 
+	// peerSigHashes is the initiator's advertised RFC 7427 signature-hash list
+	// from IKE_SA_INIT, used to pick the algorithm when the server signs its own
+	// certificate AUTH. Empty means the peer offered none (legacy RSA only).
+	peerSigHashes []uint16
+
 	// ClientIP is the internal address assigned to this peer via CP.
 	ClientIP net.IP
 

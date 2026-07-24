@@ -238,6 +238,24 @@ const (
 	SignatureHashAlgorithms NotifyType = 16431
 )
 
+// CertEncoding values in CERT / CERTREQ payloads (RFC 7296 section 3.6). Only
+// X.509 signature certificates are used here.
+type CertEncoding uint8
+
+const (
+	CertX509Signature CertEncoding = 4
+)
+
+// Hash-algorithm identifiers carried in a SIGNATURE_HASH_ALGORITHMS notify
+// (RFC 7427 section 4): a peer lists the hashes it will accept in an RFC 7427
+// Digital Signature (AUTH method 14).
+const (
+	HashSHA1   uint16 = 1
+	HashSHA256 uint16 = 2
+	HashSHA384 uint16 = 3
+	HashSHA512 uint16 = 4
+)
+
 // Traffic-selector types (RFC 7296 section 3.13.1).
 type TSType uint8
 
